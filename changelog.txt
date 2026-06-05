@@ -1,9 +1,0 @@
----------------------------------------------------------------------------------------------------
-Version: 1.0.0
-Date: 2026-06-05
-  Info:
-    - rewrite README for mod
-  Features:
-    - add detonation gameplay
-  Bugfixes:
-    - use full base dependency version
