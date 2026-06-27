@@ -1752,7 +1752,7 @@ end
 local function on_entity_built(event)
   local entity = event.entity
   if entity and entity.valid then
-    CircuitDetonator.restore_for_built_entity(entity)
+    CircuitDetonator.restore_for_built_entity(entity, event.tags)
   end
 end
 
@@ -1792,6 +1792,9 @@ local function register_events()
   script.on_event(defines.events.on_gui_elem_changed, on_gui_elem_changed)
   script.on_event(defines.events.on_gui_selection_state_changed, on_gui_selection_state_changed)
   script.on_event(defines.events.on_gui_text_changed, on_gui_text_changed)
+  script.on_event(defines.events.on_entity_settings_pasted, CircuitDetonator.on_entity_settings_pasted)
+  script.on_event(defines.events.on_player_setup_blueprint, CircuitDetonator.on_player_setup_blueprint)
+  script.on_event(defines.events.on_blueprint_settings_pasted, CircuitDetonator.on_blueprint_settings_pasted)
   script.on_event(defines.events.on_built_entity, on_entity_built, {
     { filter = "type", type = "container" },
     { filter = "type", type = "logistic-container" },

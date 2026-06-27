@@ -1,6 +1,8 @@
 local CircuitDetonator = {}
 
 local PROXY_ENTITY = "detonation-circuit-detonator-proxy"
+local BLUEPRINT_TAG = "detonation-circuit-detonator"
+local BLUEPRINT_TAG_VERSION = 1
 
 local GUI_FRAME = "detonation_circuit_detonator_frame"
 local GUI_CONDITION_SIGNAL = "detonation_circuit_detonator_condition_signal"
@@ -200,6 +202,25 @@ local function rebuild_key_for_entity(entity)
   )
 end
 
+local function make_blueprint_tag(config)
+  if not config then return nil end
+
+  return {
+    version = BLUEPRINT_TAG_VERSION,
+    config = copy_table(config),
+  }
+end
+
+local function config_from_blueprint_tags(tags)
+  if type(tags) ~= "table" then return nil end
+  local tag = tags[BLUEPRINT_TAG]
+  if type(tag) ~= "table" then return nil end
+  if tag.version ~= BLUEPRINT_TAG_VERSION then return nil end
+  if type(tag.config) ~= "table" then return nil end
+
+  return copy_table(tag.config)
+end
+
 local function capture_proxy_config(proxy)
   if not (proxy and proxy.valid) then return nil end
 
@@ -299,6 +320,12 @@ end
 local function get_link_for_chest(chest)
   if not (chest and chest.valid and chest.unit_number) then return nil end
   return get_link_by_chest_unit(chest.unit_number)
+end
+
+local function config_from_active_chest_detonator(chest)
+  local link = get_link_for_chest(chest)
+  if not link then return nil end
+  return capture_proxy_config(link.proxy)
 end
 
 local function get_condition_draft_for_chest(chest)
@@ -576,9 +603,22 @@ function CircuitDetonator.on_post_entity_died(event)
   storage.circuit_detonator_pending_ghosts[ghost.unit_number] = key
 end
 
-function CircuitDetonator.restore_for_built_entity(entity)
+local function apply_blueprint_config_to_chest(entity, tags)
+  if not CircuitDetonator.is_supported_container(entity) then return false end
+
+  local config = config_from_blueprint_tags(tags)
+  if not config then return false end
+
+  set_condition_draft_for_chest(entity, condition_draft_from_config(config))
+  CircuitDetonator.ensure_for_chest(entity, config)
+  return true
+end
+
+function CircuitDetonator.restore_for_built_entity(entity, tags)
   if not CircuitDetonator.is_supported_container(entity) then return end
   ensure_storage()
+
+  if apply_blueprint_config_to_chest(entity, tags) then return end
 
   local key = rebuild_key_for_entity(entity)
   local config = key and storage.circuit_detonator_pending_rebuilds[key]
@@ -586,6 +626,73 @@ function CircuitDetonator.restore_for_built_entity(entity)
 
   remove_pending_rebuild_key(key)
   CircuitDetonator.ensure_for_chest(entity, config)
+end
+
+function CircuitDetonator.on_player_setup_blueprint(event)
+  local blueprint = event.stack or event.record
+  if not blueprint then return end
+
+  local ok_setup, is_setup = pcall(function()
+    return blueprint.is_blueprint_setup()
+  end)
+  if not ok_setup or not is_setup then return end
+
+  local mapping_value = event.mapping
+  if not mapping_value then return end
+
+  local ok_mapping, mapping = pcall(function()
+    return mapping_value.get()
+  end)
+  if not ok_mapping or type(mapping) ~= "table" then return end
+
+  for blueprint_entity_index, source_entity in pairs(mapping) do
+    if CircuitDetonator.is_supported_container(source_entity) then
+      local config = config_from_active_chest_detonator(source_entity)
+      local tag = make_blueprint_tag(config)
+      if tag then
+        pcall(function()
+          blueprint.set_blueprint_entity_tag(blueprint_entity_index, BLUEPRINT_TAG, tag)
+        end)
+      end
+    end
+  end
+end
+
+function CircuitDetonator.on_entity_settings_pasted(event)
+  local source = event.source
+  local destination = event.destination
+  if not CircuitDetonator.is_supported_container(source) then return end
+  if not CircuitDetonator.is_supported_container(destination) then return end
+  ensure_storage()
+
+  local source_link = get_link_for_chest(source)
+  if not source_link then return end
+
+  local config = capture_proxy_config(source_link.proxy)
+  if not config then return end
+
+  set_condition_draft_for_chest(destination, condition_draft_from_config(config))
+  CircuitDetonator.ensure_for_chest(destination, config)
+
+  for _, player in pairs(game.players) do
+    if player.valid and storage.circuit_detonator_gui_chest[player.index] == destination.unit_number then
+      CircuitDetonator.build_gui(player, destination)
+    end
+  end
+end
+
+function CircuitDetonator.on_blueprint_settings_pasted(event)
+  local entity = event.entity
+  if not (entity and entity.valid) then return end
+
+  local tags = event.tags
+  if not tags then
+    pcall(function()
+      tags = entity.tags
+    end)
+  end
+
+  apply_blueprint_config_to_chest(entity, tags)
 end
 
 function CircuitDetonator.on_pre_ghost_deconstructed(event)
