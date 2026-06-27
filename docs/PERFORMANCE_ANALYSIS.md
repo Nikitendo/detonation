@@ -81,6 +81,8 @@ Verification:
 
 ### P1.1. Real-launcher queue scans all jobs every tick
 
+Status: fixed in `runtime/launcher.lua`.
+
 Relevant code:
 
 - `runtime/launcher.lua`: `Launcher.enqueue()`
@@ -124,6 +126,19 @@ Suggested fix:
 - Avoid `table.remove` on large ordered arrays.
   - Use head index for FIFO pending queue.
   - Use swap-remove for unordered active arrays.
+
+Implemented shape:
+
+- `storage.launcher_pending_jobs` stores pending jobs in per-family FIFO queues.
+- `storage.launcher_pending_heads` stores each FIFO head index.
+- `storage.launcher_pending_cursor` rotates through launcher families.
+- `storage.launcher_active_jobs` stores only firing/cleanup jobs.
+- Legacy `storage.launcher_jobs` is migrated on the next write-allowed
+  initialization path.
+- Pending start order is round-robin by family, so a long `launcher-stream`
+  queue does not block `launcher-composite-beam` or `launcher-line` jobs behind
+  it.
+- Active cleanup uses swap-remove instead of `table.remove`.
 
 Expected impact:
 

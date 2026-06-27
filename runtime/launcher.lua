@@ -26,6 +26,7 @@ local DEFAULT_QUALITY_NAME = "normal"
 local DEFAULT_FORCE_NAME = "player"
 local SEED_MODULUS = 2147483646
 local GATE_DEFAULTS_VERSION = 3
+local UNKNOWN_PENDING_FAMILY = "__unknown"
 
 local ENABLED_FAMILIES = {
   [Launcher.FAMILY_STREAM] = true,
@@ -37,6 +38,18 @@ local catalog = nil
 local candidates_by_category = nil
 local destroy_entity
 local cleanup_launcher_job
+
+local PENDING_FAMILY_ORDER = {
+  Launcher.FAMILY_COMPOSITE_BEAM,
+  Launcher.FAMILY_LINE,
+  Launcher.FAMILY_STREAM,
+  UNKNOWN_PENDING_FAMILY,
+}
+local PENDING_FAMILIES = {
+  [Launcher.FAMILY_COMPOSITE_BEAM] = true,
+  [Launcher.FAMILY_LINE] = true,
+  [Launcher.FAMILY_STREAM] = true,
+}
 
 local function is_map_position(value)
   return type(value) == "table"
@@ -133,8 +146,139 @@ local function default_enabled_families()
   return enabled
 end
 
+local function normalize_pending_family(job)
+  if type(job) == "table" and PENDING_FAMILIES[job.family] then return job.family end
+  return UNKNOWN_PENDING_FAMILY
+end
+
+local function ensure_pending_family_storage(family)
+  storage.launcher_pending_jobs = storage.launcher_pending_jobs or {}
+  storage.launcher_pending_heads = storage.launcher_pending_heads or {}
+
+  local queue = storage.launcher_pending_jobs[family]
+  if not queue then
+    queue = {}
+    storage.launcher_pending_jobs[family] = queue
+  end
+  storage.launcher_pending_heads[family] = storage.launcher_pending_heads[family] or 1
+  return queue
+end
+
+local function append_pending_job(job)
+  local family = normalize_pending_family(job)
+  local queue = ensure_pending_family_storage(family)
+  queue[#queue + 1] = job
+end
+
+local function count_pending_jobs()
+  local queues = storage and storage.launcher_pending_jobs
+  if type(queues) ~= "table" then return 0 end
+
+  local heads = storage.launcher_pending_heads or {}
+  local total = 0
+  for family, queue in pairs(queues) do
+    local head = heads[family] or 1
+    total = total + math.max(0, #queue - head + 1)
+  end
+  return total
+end
+
+local function compact_pending_queue(family)
+  local queues = storage and storage.launcher_pending_jobs
+  if type(queues) ~= "table" then return end
+
+  local queue = queues[family]
+  if not queue then return end
+
+  local heads = storage.launcher_pending_heads or {}
+  local head = heads[family] or 1
+  local tail = #queue
+  if head > tail then
+    queues[family] = nil
+    heads[family] = nil
+    return
+  end
+  if head <= 64 or head <= tail * 0.5 then return end
+
+  local write_index = 1
+  for read_index = head, tail do
+    queue[write_index] = queue[read_index]
+    write_index = write_index + 1
+  end
+  for index = write_index, tail do
+    queue[index] = nil
+  end
+
+  if write_index == 1 then
+    queues[family] = nil
+    heads[family] = nil
+  else
+    heads[family] = 1
+  end
+end
+
+local function migrate_legacy_jobs()
+  local legacy_jobs = storage.launcher_jobs
+  if type(legacy_jobs) ~= "table" or #legacy_jobs == 0 then
+    storage.launcher_jobs = nil
+    return
+  end
+
+  local active_jobs = storage.launcher_active_jobs
+  for i = 1, #legacy_jobs do
+    local job = legacy_jobs[i]
+    if type(job) == "table" and job.state == "pending" then
+      append_pending_job(job)
+    elseif type(job) == "table" then
+      active_jobs[#active_jobs + 1] = job
+    end
+  end
+  storage.launcher_jobs = nil
+end
+
+local function next_pending_cursor(cursor)
+  cursor = (cursor or 1) + 1
+  if cursor > #PENDING_FAMILY_ORDER then return 1 end
+  return cursor
+end
+
+local function pop_next_ready_pending_job(tick)
+  local queues = storage and storage.launcher_pending_jobs
+  if type(queues) ~= "table" then return nil end
+
+  local heads = storage.launcher_pending_heads or {}
+  local cursor = storage.launcher_pending_cursor or 1
+  if cursor < 1 or cursor > #PENDING_FAMILY_ORDER then cursor = 1 end
+
+  for _ = 1, #PENDING_FAMILY_ORDER do
+    local family = PENDING_FAMILY_ORDER[cursor]
+    local queue = queues[family]
+    local head = heads[family] or 1
+    local job = queue and queue[head] or nil
+    local next_cursor = next_pending_cursor(cursor)
+
+    if job and job.state == "pending" and tick >= (job.spawn_tick or 0) then
+      heads[family] = head + 1
+      storage.launcher_pending_heads = heads
+      storage.launcher_pending_cursor = next_cursor
+      compact_pending_queue(family)
+      return job
+    end
+
+    cursor = next_cursor
+  end
+
+  storage.launcher_pending_cursor = cursor
+  return nil
+end
+
 function Launcher.initialize_storage()
-  storage.launcher_jobs = storage.launcher_jobs or {}
+  storage.launcher_pending_jobs = storage.launcher_pending_jobs or {}
+  storage.launcher_pending_heads = storage.launcher_pending_heads or {}
+  storage.launcher_pending_cursor = storage.launcher_pending_cursor or 1
+  storage.launcher_active_jobs = storage.launcher_active_jobs or {}
+  migrate_legacy_jobs()
+
   storage.real_launcher_enabled_families = storage.real_launcher_enabled_families or default_enabled_families()
 
   local defaults_version = storage.real_launcher_gate_defaults_version or 0
@@ -148,23 +292,41 @@ end
 
 function Launcher.reset_jobs()
   Launcher.initialize_storage()
-  local jobs = storage.launcher_jobs
-  if jobs then
-    for i = 1, #jobs do
-      cleanup_launcher_job(jobs[i])
+  local pending_jobs = storage.launcher_pending_jobs
+  if pending_jobs then
+    for _, queue in pairs(pending_jobs) do
+      for i = 1, #queue do
+        cleanup_launcher_job(queue[i])
+      end
     end
   end
-  storage.launcher_jobs = {}
+
+  local active_jobs = storage.launcher_active_jobs
+  if active_jobs then
+    for i = 1, #active_jobs do
+      cleanup_launcher_job(active_jobs[i])
+    end
+  end
+
+  storage.launcher_jobs = nil
+  storage.launcher_pending_jobs = {}
+  storage.launcher_pending_heads = {}
+  storage.launcher_pending_cursor = 1
+  storage.launcher_active_jobs = {}
 end
 
 function Launcher.has_pending_jobs()
   if not storage then return false end
-  local jobs = storage.launcher_jobs
-  return jobs ~= nil and #jobs > 0
+  if type(storage.launcher_jobs) == "table" and #storage.launcher_jobs > 0 then return true end
+  if type(storage.launcher_active_jobs) == "table" and #storage.launcher_active_jobs > 0 then return true end
+  return count_pending_jobs() > 0
 end
 
 function Launcher.queued_count()
-  return storage and storage.launcher_jobs and #storage.launcher_jobs or 0
+  if not storage then return 0 end
+  local legacy_count = type(storage.launcher_jobs) == "table" and #storage.launcher_jobs or 0
+  local active_count = type(storage.launcher_active_jobs) == "table" and #storage.launcher_active_jobs or 0
+  return legacy_count + active_count + count_pending_jobs()
 end
 
 function Launcher.is_family_enabled(family)
@@ -690,7 +852,7 @@ function Launcher.enqueue(surface, center, target, distance, node, speed, force,
     if stream_max then stream_distance = math.min(stream_distance, stream_max) end
   end
 
-  storage.launcher_jobs[#storage.launcher_jobs + 1] = {
+  append_pending_job {
     family = node.family,
     launcher_prototype = node.launcher_prototype,
     ammo_item_name = node.item_name,
@@ -847,11 +1009,15 @@ local function prepare_job(job)
 end
 
 function Launcher.process_jobs(event, fallback)
-  local jobs = storage and storage.launcher_jobs
-  if not jobs or #jobs == 0 then return end
+  if not storage then return end
+  Launcher.initialize_storage()
 
-  for i = #jobs, 1, -1 do
-    local job = jobs[i]
+  local active_jobs = storage.launcher_active_jobs
+  local pending_count = count_pending_jobs()
+  if #active_jobs == 0 and pending_count == 0 then return end
+
+  for i = #active_jobs, 1, -1 do
+    local job = active_jobs[i]
     if job.state == "firing" then
       if event.tick >= job.release_tick then
         if job.launcher and job.launcher.valid then
@@ -868,33 +1034,25 @@ function Launcher.process_jobs(event, fallback)
       end
     elseif job.state == "cleanup" and event.tick >= job.cleanup_tick then
       cleanup_launcher_job(job)
-      table.remove(jobs, i)
+      active_jobs[i] = active_jobs[#active_jobs]
+      active_jobs[#active_jobs] = nil
     end
   end
 
-  if #jobs == 0 then return end
+  if pending_count <= 0 then return end
 
   local starts_remaining = MAX_STARTS_PER_TICK
-  local failed_indices
-  for i = 1, #jobs do
-    if starts_remaining <= 0 then break end
-    local job = jobs[i]
-    if job.state == "pending" and event.tick >= job.spawn_tick then
-      local ok, reason = prepare_job(job)
-      if ok then
-        starts_remaining = starts_remaining - 1
-      else
-        fallback(job, reason)
-        failed_indices = failed_indices or {}
-        failed_indices[#failed_indices + 1] = i
-      end
-    end
-  end
+  while starts_remaining > 0 do
+    local job = pop_next_ready_pending_job(event.tick)
+    if not job then break end
 
-  if failed_indices then
-    for i = #failed_indices, 1, -1 do
-      table.remove(jobs, failed_indices[i])
+    local ok, reason = prepare_job(job)
+    if ok then
+      active_jobs[#active_jobs + 1] = job
+    else
+      fallback(job, reason)
     end
+    starts_remaining = starts_remaining - 1
   end
 end
 
