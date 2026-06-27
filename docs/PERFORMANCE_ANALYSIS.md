@@ -237,6 +237,8 @@ Verification:
 
 ### P1.3. Full per-shot schedule allocation and sort for immediate detonations
 
+Status: partially fixed in `control.lua`.
+
 Relevant code:
 
 - `control.lua`: `build_emit_schedule()`
@@ -271,6 +273,16 @@ Suggested fix:
   - positive stagger;
   - positive initial delay;
   - cases where deterministic mixed-ammo interleave is intentionally needed.
+
+Implemented shape:
+
+- Single-node immediate detonations skip `build_emit_schedule()`.
+- This applies only when:
+  - there is exactly one payload node;
+  - `detonation-staggered-detonations` resolves to `0`;
+  - `detonation-initial-detonation-delay` resolves to `0`.
+- Mixed payloads, staggered detonations, and delayed detonations still use the
+  existing deterministic schedule path.
 
 Expected impact:
 

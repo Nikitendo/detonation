@@ -1464,6 +1464,59 @@ local function process_staggered_emit_jobs(event)
   end
 end
 
+local function execute_payload_emission(
+  surface,
+  center,
+  node,
+  emission_index,
+  scheduled_count,
+  stagger_span,
+  initial_delay_ticks,
+  sampler,
+  rng,
+  excluded_entity,
+  attack_force,
+  average_speed,
+  cause
+)
+  local target, distance             = sampler(node.radius_scale)
+  local final_target, final_distance = resolve_emit_target(node, surface, center, target, distance, rng,
+    excluded_entity)
+  local speed                        = compute_projectile_speed(rng, average_speed)
+  local consumed_count               = 1
+  Launcher.resolve_prototype(surface, attack_force, node, ITEM_SPECS)
+  local can_queue = Launcher.can_queue(node, final_target)
+  if can_queue then
+    consumed_count = Launcher.resolve_charge_count(node)
+  end
+
+  local job = {
+    node = copy_emit_node(node),
+    surface_index = surface.index,
+    center = copy_position(center),
+    target = is_valid_entity_reference(final_target) and final_target or nil,
+    target_position = copy_position(final_target and final_target.position) or copy_position(final_target),
+    distance = final_distance,
+    speed = speed,
+    force = attack_force,
+    cause = cause,
+    charge_count = consumed_count,
+  }
+
+  local execute_tick = resolve_staggered_execute_tick(
+    game.tick,
+    emission_index,
+    scheduled_count,
+    stagger_span,
+    initial_delay_ticks
+  )
+  if execute_tick then
+    enqueue_staggered_emit_job(job, execute_tick)
+  else
+    execute_emit_job(job)
+  end
+end
+
 local function emit_payload(surface, center, payload, excluded_entity, force, cause, emission_direction)
   if payload.total_count <= 0 then return end
 
@@ -1510,10 +1563,6 @@ local function emit_payload(surface, center, payload, excluded_entity, force, ca
 
   local emit_seed     = deterministic_seed(center, game.tick)
   local rng           = game.create_random_generator(emit_seed)
-  local schedule_rng  = game.create_random_generator(
-    normalize_random_seed(emit_seed + scheduled_count * 104729 + #nodes * 8191)
-  )
-  local schedule      = build_emit_schedule(nodes, budget, schedule_rng)
   local sampler       = Distribution.new(center, payload.total_count, rng, {
     direction = emission_direction,
   })
@@ -1539,43 +1588,47 @@ local function emit_payload(surface, center, payload, excluded_entity, force, ca
     end
   end
 
-  for emission_index = 1, #schedule do
-    local node = schedule[emission_index].node
-    local target, distance             = sampler(node.radius_scale)
-    local final_target, final_distance = resolve_emit_target(node, surface, center, target, distance, rng,
-      excluded_entity)
-    local speed                        = compute_projectile_speed(rng, average_speed)
-    local consumed_count               = 1
-    Launcher.resolve_prototype(surface, attack_force, node, ITEM_SPECS)
-    local can_queue = Launcher.can_queue(node, final_target)
-    if can_queue then
-      consumed_count = Launcher.resolve_charge_count(node)
+  if #nodes == 1 and stagger_span <= 0 and initial_delay_ticks <= 0 then
+    local node = nodes[1]
+    local count = math_floor(budget[node.payload_key] or 0)
+    for emission_index = 1, count do
+      execute_payload_emission(
+        surface,
+        center,
+        node,
+        emission_index,
+        scheduled_count,
+        stagger_span,
+        initial_delay_ticks,
+        sampler,
+        rng,
+        excluded_entity,
+        attack_force,
+        average_speed,
+        cause
+      )
     end
-
-    local job = {
-      node = copy_emit_node(node),
-      surface_index = surface.index,
-      center = copy_position(center),
-      target = is_valid_entity_reference(final_target) and final_target or nil,
-      target_position = copy_position(final_target and final_target.position) or copy_position(final_target),
-      distance = final_distance,
-      speed = speed,
-      force = attack_force,
-      cause = cause,
-      charge_count = consumed_count,
-    }
-
-    local execute_tick = resolve_staggered_execute_tick(
-      game.tick,
-      emission_index,
-      scheduled_count,
-      stagger_span,
-      initial_delay_ticks
+  else
+    local schedule_rng = game.create_random_generator(
+      normalize_random_seed(emit_seed + scheduled_count * 104729 + #nodes * 8191)
     )
-    if execute_tick then
-      enqueue_staggered_emit_job(job, execute_tick)
-    else
-      execute_emit_job(job)
+    local schedule = build_emit_schedule(nodes, budget, schedule_rng)
+    for emission_index = 1, #schedule do
+      execute_payload_emission(
+        surface,
+        center,
+        schedule[emission_index].node,
+        emission_index,
+        scheduled_count,
+        stagger_span,
+        initial_delay_ticks,
+        sampler,
+        rng,
+        excluded_entity,
+        attack_force,
+        average_speed,
+        cause
+      )
     end
   end
 end
