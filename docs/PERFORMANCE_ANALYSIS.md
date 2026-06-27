@@ -32,6 +32,8 @@ They are costs paid by the mod's Lua logic.
 
 ### P0.1. Rebuild/reset can orphan temporary launcher hosts
 
+Status: fixed in `runtime/launcher.lua`.
+
 Relevant code:
 
 - `runtime/launcher.lua`: `Launcher.reset_jobs()`
@@ -746,4 +748,3 @@ A performance change should be considered complete only when:
   - at least one large direct-spawn detonation;
   - at least one large launcher-sensitive detonation;
   - save/load during delayed or sustained jobs if storage format changed.
-

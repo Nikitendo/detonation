@@ -35,6 +35,8 @@ local ENABLED_FAMILIES = {
 
 local catalog = nil
 local candidates_by_category = nil
+local destroy_entity
+local cleanup_launcher_job
 
 local function is_map_position(value)
   return type(value) == "table"
@@ -146,6 +148,12 @@ end
 
 function Launcher.reset_jobs()
   Launcher.initialize_storage()
+  local jobs = storage.launcher_jobs
+  if jobs then
+    for i = 1, #jobs do
+      cleanup_launcher_job(jobs[i])
+    end
+  end
   storage.launcher_jobs = {}
 end
 
@@ -180,10 +188,25 @@ function Launcher.family_names()
   }
 end
 
-local function destroy_entity(entity)
+destroy_entity = function(entity)
   if entity and entity.valid then
     pcall(function() entity.destroy() end)
   end
+end
+
+cleanup_launcher_job = function(job)
+  if type(job) ~= "table" then return end
+  local launcher = job.launcher
+  if launcher and launcher.valid then
+    pcall(function()
+      launcher.shooting_state = {
+        state = defines.shooting.not_shooting,
+        position = job.target_position,
+      }
+    end)
+  end
+  destroy_entity(launcher)
+  job.launcher = nil
 end
 
 local function set_host_flags(entity)
@@ -840,7 +863,7 @@ function Launcher.process_jobs(event, fallback)
         maybe_retarget_stream(job, event.tick)
       end
     elseif job.state == "cleanup" and event.tick >= job.cleanup_tick then
-      destroy_entity(job.launcher)
+      cleanup_launcher_job(job)
       table.remove(jobs, i)
     end
   end
