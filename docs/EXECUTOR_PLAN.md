@@ -55,7 +55,8 @@
 ## Rollout Plan
 1. Add explicit `family`, `current_executor`, `target_executor`, and `launcher_prototype` metadata to compiled item specs.
 2. Keep the current direct-spawn path as the stable executor for `direct-projectile` and `capsule-projectile`.
-3. Build a runtime launcher catalog dynamically by asking Factorio which items fit `character_guns` and can actually `can_shoot(...)` with the ammo item.
+3. Build a runtime launcher catalog from `attack_parameters.ammo_categories`,
+   then validate candidates through `character_guns` and `can_shoot(...)`.
 4. Introduce a real launcher executor behind family gates, starting with:
    - `tesla-ammo`
    - `flamethrower-ammo`
@@ -87,26 +88,30 @@
   selection, and the direct-spawn fallback.
 - `runtime/launcher.lua` owns only launcher-sensitive behavior:
   - family gates and launcher job storage;
-  - empirical launcher discovery and the launcher catalog;
+  - metadata-based launcher discovery and the launcher catalog;
   - stream target normalization and retargeting;
   - temporary launcher-host creation, firing, and cleanup.
 - The launcher module does not call the direct-spawn executor. When a delayed
   launcher job fails, it returns the stored job to `control.lua` through a
   callback so the existing fallback path remains the single owner of direct
   projectile creation.
-- This extraction is intentionally behavior-preserving. Replacing empirical
-  discovery with `LuaItemPrototype::attack_parameters` is a separate follow-up
-  change after the three launcher families are verified in game.
+- The extraction was verified in game for the three launcher families before
+  metadata-based discovery was introduced.
 
 ## Runtime Launcher Discovery
-- Runtime docs do not expose gun `attack_parameters` on `LuaItemPrototype`, so launcher discovery can not be metadata-only.
-- Discovery therefore uses a temporary `character` plus temporary inventories:
-  - try candidate items in `character_guns`
-  - insert the ammo item into `character_ammo`
-  - accept the candidate only if Factorio reports `can_shoot(...) == true`
-- For position-targeted stream families, discovery can also probe outward
-  distances and retain the empirical shootable envelope for that launcher.
-- This keeps launcher selection runtime-only and compatible with modded guns that behave like normal character weapons.
+- Discovery reads `LuaItemPrototype::attack_parameters` only for ammo categories
+  already classified as launcher-sensitive.
+- Candidate guns are indexed by `attack_parameters.ammo_categories`; ordinary
+  direct-projectile ammo never enters launcher discovery.
+- Candidate order remains deterministic: visible guns first, then prototype name.
+- Range comes from `attack_parameters.min_range` and
+  `attack_parameters.range * ammo_type.range_modifier`.
+- The selected gun is cached by ammo category, but effective range is calculated
+  per ammo item so different items in the same category can use different
+  `range_modifier` values.
+- A temporary `character` still inserts the selected gun and ammo and calls
+  `can_shoot(...)` as the final compatibility check.
+- The old integer range walk from 1 to 64 is no longer used.
 
 ## Current Implementation Target
 - Runtime-launcher host entity strategy: temporary hidden
@@ -124,8 +129,8 @@
   the blast center instead of snapping to nearby entities around the center.
 - The stream executor needs a minimum aim distance so small blast spreads still
   produce a shootable target for the real launcher path.
-- The stream executor should also clamp aim distance to the empirically
-  discovered launcher max range so large detonation bursts do not flood the queue
+- The stream executor should also clamp aim distance to the metadata-derived
+  launcher max range so large detonation bursts do not flood the queue
   with guaranteed `launcher cannot shoot target` fallbacks.
 - Delayed fallbacks should omit invalid `cause` entities before
   `surface.create_entity{...}` to avoid next-tick invalid-reference errors.

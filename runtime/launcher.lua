@@ -12,14 +12,14 @@ local SPAWN_DELAY = 1
 local DEFAULT_FIRE_TICKS = 1
 local DEFAULT_CLEANUP_TICKS = 2
 local MAX_STARTS_PER_TICK = 1
-local DISCOVERY_TARGET_OFFSET = 6
+local DISCOVERY_PREFERRED_DISTANCE = 6
+local DISCOVERY_RANGE_MARGIN = 0.25
 local STREAM_MIN_AIM_DISTANCE = 4.0
 local STREAM_MIN_FIRE_TICKS = 20
 local STREAM_MAX_FIRE_TICKS = 120
 local STREAM_RETARGET_INTERVAL_TICKS = 5
 local STREAM_RETARGET_MAX_ANGLE_OFFSET = math.pi * 10
 local STREAM_RETARGET_MAX_DISTANCE_OFFSET = 2.0
-local RANGE_PROBE_MAX_DISTANCE = 64
 local HOST_SEARCH_RADIUS = 1.5
 local HOST_SEARCH_PRECISION = 0.25
 local DEFAULT_QUALITY_NAME = "normal"
@@ -34,6 +34,7 @@ local ENABLED_FAMILIES = {
 }
 
 local catalog = nil
+local candidates_by_category = nil
 
 local function is_map_position(value)
   return type(value) == "table"
@@ -198,20 +199,52 @@ local function is_hidden_item_prototype(prototype)
   return ok_fallback and fallback == true
 end
 
-local function choose_catalog_entry(existing, item_name, prototype, min_distance, max_distance)
-  local hidden = is_hidden_item_prototype(prototype)
-  if not existing
-      or (existing.hidden and not hidden)
-      or (existing.hidden == hidden and item_name < existing.name)
-  then
-    return {
-      name = item_name,
-      hidden = hidden,
-      min_distance = min_distance,
-      max_distance = max_distance,
-    }
+local function compare_candidates(a, b)
+  if a.hidden ~= b.hidden then return not a.hidden end
+  return a.name < b.name
+end
+
+local function read_attack_parameters(prototype)
+  local ok, attack = pcall(function() return prototype.attack_parameters end)
+  if not ok or type(attack) ~= "table" then return nil end
+  if type(attack.ammo_categories) ~= "table" then return nil end
+  if type(attack.range) ~= "number" then return nil end
+  return attack
+end
+
+local function build_candidate_index(required_ammo_items)
+  local requested = {}
+  local index = {}
+
+  for ammo_category in pairs(required_ammo_items or {}) do
+    requested[ammo_category] = true
+    index[ammo_category] = {}
   end
-  return existing
+
+  for item_name, prototype in pairs(prototypes.item) do
+    local attack = read_attack_parameters(prototype)
+    if attack then
+      for i = 1, #attack.ammo_categories do
+        local ammo_category = normalize_id_name(attack.ammo_categories[i]) or attack.ammo_categories[i]
+        local candidates = requested[ammo_category] and index[ammo_category] or nil
+        if candidates then
+          candidates[#candidates + 1] = {
+            name = item_name,
+            hidden = is_hidden_item_prototype(prototype),
+            attack_type = attack.type,
+            min_range = type(attack.min_range) == "number" and attack.min_range or 0,
+            range = attack.range,
+          }
+        end
+      end
+    end
+  end
+
+  for _, candidates in pairs(index) do
+    table.sort(candidates, compare_candidates)
+  end
+
+  return index
 end
 
 local function find_discovery_surface()
@@ -274,25 +307,6 @@ local function create_discovery_context(surface, force)
   local host_position = find_non_colliding_position_safe(surface, HOST_CHARACTER, { x = 0, y = 0 }, 128, 0.5)
   if not host_position then return nil, "host position unavailable" end
 
-  local target_position = find_non_colliding_position_safe(
-    surface,
-    "steel-chest",
-    { x = host_position.x + DISCOVERY_TARGET_OFFSET, y = host_position.y },
-    16,
-    0.5
-  )
-  if not target_position then return nil, "target position unavailable" end
-
-  local ok_target, target = pcall(function()
-    return surface.create_entity {
-      name = "steel-chest",
-      position = target_position,
-      force = game.forces.enemy or game.forces.neutral,
-      create_build_effect_smoke = false,
-    }
-  end)
-  if not ok_target or not target then return nil, "discovery target create failed" end
-
   local ok_launcher, launcher = pcall(function()
     return surface.create_entity {
       name = HOST_CHARACTER,
@@ -302,45 +316,107 @@ local function create_discovery_context(surface, force)
     }
   end)
   if not ok_launcher or not launcher then
-    destroy_entity(target)
     return nil, "discovery launcher create failed"
   end
 
   set_host_flags(launcher)
-  pcall(function() target.destructible = false end)
-  pcall(function() target.minable = false end)
 
   local guns = launcher.get_inventory(defines.inventory.character_guns)
   local ammo = launcher.get_inventory(defines.inventory.character_ammo)
   if not (guns and ammo) then
     destroy_entity(launcher)
-    destroy_entity(target)
     return nil, "discovery inventories unavailable"
   end
 
-  return { launcher = launcher, target = target, guns = guns, ammo = ammo }
+  return {
+    surface = surface,
+    launcher = launcher,
+    target = nil,
+    guns = guns,
+    ammo = ammo,
+  }
 end
 
-local function measure_range(context, family)
-  if family ~= Launcher.FAMILY_STREAM then return nil, nil end
-  if not (context and context.launcher and context.launcher.valid) then return nil, nil end
+local function resolve_ammo_range_modifier(ammo_item_name)
+  local prototype = prototypes.item[ammo_item_name]
+  if not prototype then return 1 end
 
-  local source_position = copy_position(context.launcher.position)
-  if not source_position then return nil, nil end
-
-  local min_distance
-  local max_distance
-  for probe_distance = 1, RANGE_PROBE_MAX_DISTANCE do
-    local probe_position = { x = source_position.x + probe_distance, y = source_position.y }
-    if try_can_shoot(context.launcher, family, nil, probe_position) then
-      min_distance = min_distance or probe_distance
-      max_distance = probe_distance
-    end
+  local ok, ammo_type = pcall(function() return prototype.get_ammo_type("player") end)
+  if not ok or not ammo_type then
+    ok, ammo_type = pcall(function() return prototype.get_ammo_type() end)
   end
+  if not ok or not ammo_type then return 1 end
+
+  local modifier = ammo_type.range_modifier
+  if type(modifier) ~= "number" then return 1 end
+  return math.max(0, modifier)
+end
+
+local function resolve_candidate_range(candidate, ammo_range_modifier)
+  local min_distance = math.max(0, candidate.min_range or 0)
+  local max_distance = math.max(0, (candidate.range or 0) * ammo_range_modifier)
   return min_distance, max_distance
 end
 
+local function resolve_probe_distance(min_distance, max_distance)
+  if max_distance <= 0 then return nil end
+
+  local lower = min_distance + DISCOVERY_RANGE_MARGIN
+  local upper = max_distance - DISCOVERY_RANGE_MARGIN
+  if upper < lower then
+    return math.max(0, math.min(max_distance, (min_distance + max_distance) * 0.5))
+  end
+
+  return math.max(lower, math.min(DISCOVERY_PREFERRED_DISTANCE, upper))
+end
+
+local function create_discovery_target(context, probe_distance)
+  destroy_entity(context.target)
+  context.target = nil
+
+  local source_position = copy_position(context.launcher.position)
+  if not source_position then return nil end
+
+  local desired_position = {
+    x = source_position.x + probe_distance,
+    y = source_position.y,
+  }
+  local target_position = find_non_colliding_position_safe(
+    context.surface,
+    "steel-chest",
+    desired_position,
+    2,
+    0.25
+  ) or desired_position
+
+  local ok, target = pcall(function()
+    return context.surface.create_entity {
+      name = "steel-chest",
+      position = target_position,
+      force = game.forces.enemy or game.forces.neutral,
+      create_build_effect_smoke = false,
+    }
+  end)
+  if not ok or not target then return nil end
+
+  context.target = target
+  pcall(function() target.destructible = false end)
+  pcall(function() target.minable = false end)
+  return target
+end
+
 local function discover(surface, force, ammo_item_name, ammo_category, family)
+  if not candidates_by_category or not candidates_by_category[ammo_category] then
+    local built = build_candidate_index {
+      [ammo_category] = {
+        item_name = ammo_item_name,
+        family = family,
+      },
+    }
+    candidates_by_category = candidates_by_category or {}
+    candidates_by_category[ammo_category] = built[ammo_category] or {}
+  end
+
   local context, reason = create_discovery_context(surface, force)
   if not context then
     Debug.log("[DETONATION][LAUNCHER][DISCOVER][ERROR] ammo=" .. tostring(ammo_item_name)
@@ -348,25 +424,40 @@ local function discover(surface, force, ammo_item_name, ammo_category, family)
     return nil
   end
 
+  local ammo_range_modifier = resolve_ammo_range_modifier(ammo_item_name)
+  local candidates = candidates_by_category and candidates_by_category[ammo_category] or {}
   local best
-  for item_name, prototype in pairs(prototypes.item) do
+
+  for i = 1, #candidates do
+    local candidate = candidates[i]
     clear_inventory_safe(context.guns)
     clear_inventory_safe(context.ammo)
 
+    local min_distance, max_distance = resolve_candidate_range(candidate, ammo_range_modifier)
+    local probe_distance = resolve_probe_distance(min_distance, max_distance)
+    local target = probe_distance and create_discovery_target(context, probe_distance) or nil
     local ok_can_insert, can_insert = pcall(function()
-      return context.guns.can_insert { name = item_name, count = 1 }
+      return context.guns.can_insert { name = candidate.name, count = 1 }
     end)
-    if ok_can_insert and can_insert then
-      local inserted_gun = context.guns.insert { name = item_name, count = 1 }
+    if target and ok_can_insert and can_insert then
+      local inserted_gun = context.guns.insert { name = candidate.name, count = 1 }
       local inserted_ammo = context.ammo.insert { name = ammo_item_name, count = 1 }
       if inserted_gun > 0 and inserted_ammo > 0 then
         local ok_selected = pcall(function() context.launcher.selected_gun_index = 1 end)
         local ok_can_shoot, can_shoot = pcall(function()
-          return context.launcher.can_shoot(context.target, context.target.position)
+          return context.launcher.can_shoot(target, target.position)
         end)
         if ok_selected and ok_can_shoot and can_shoot then
-          local min_distance, max_distance = measure_range(context, family)
-          best = choose_catalog_entry(best, item_name, prototype, min_distance, max_distance)
+          best = {
+            name = candidate.name,
+            hidden = candidate.hidden,
+            attack_type = candidate.attack_type,
+            min_range = candidate.min_range,
+            range = candidate.range,
+            min_distance = min_distance,
+            max_distance = max_distance,
+          }
+          break
         end
       end
     end
@@ -377,6 +468,7 @@ local function discover(surface, force, ammo_item_name, ammo_category, family)
     Debug.log("[DETONATION][LAUNCHER][DISCOVER][OK] ammo=" .. tostring(ammo_item_name)
       .. " category=" .. tostring(ammo_category)
       .. " launcher=" .. tostring(best.name)
+      .. " attack_type=" .. tostring(best.attack_type)
       .. (best.max_distance and (" range=" .. tostring(best.min_distance or "?")
         .. "-" .. tostring(best.max_distance)) or ""))
   else
@@ -388,6 +480,7 @@ end
 
 function Launcher.build_catalog(required_ammo_items)
   catalog = {}
+  candidates_by_category = build_candidate_index(required_ammo_items)
   local surface = find_discovery_surface()
   local force = game.forces[DEFAULT_FORCE_NAME]
 
@@ -405,11 +498,17 @@ function Launcher.build_catalog(required_ammo_items)
   return catalog
 end
 
-local function apply_catalog_entry(spec, launcher)
+function Launcher.resolve_range(launcher, ammo_item_name)
+  if not launcher then return nil, nil end
+  return resolve_candidate_range(launcher, resolve_ammo_range_modifier(ammo_item_name))
+end
+
+local function apply_catalog_entry(spec, launcher, ammo_item_name)
   if not (spec and launcher) then return end
   if launcher.name then spec.launcher_prototype = launcher.name end
-  if type(launcher.min_distance) == "number" then spec.launcher_min_distance = launcher.min_distance end
-  if type(launcher.max_distance) == "number" then spec.launcher_max_distance = launcher.max_distance end
+  local min_distance, max_distance = Launcher.resolve_range(launcher, ammo_item_name)
+  if type(min_distance) == "number" then spec.launcher_min_distance = min_distance end
+  if type(max_distance) == "number" then spec.launcher_max_distance = max_distance end
 end
 
 function Launcher.resolve_prototype(surface, force, node, item_specs)
@@ -427,8 +526,8 @@ function Launcher.resolve_prototype(surface, force, node, item_specs)
   end
 
   if launcher then
-    apply_catalog_entry(node, launcher)
-    apply_catalog_entry(item_specs and item_specs[node.item_name], launcher)
+    apply_catalog_entry(node, launcher, node.item_name)
+    apply_catalog_entry(item_specs and item_specs[node.item_name], launcher, node.item_name)
   end
   return node.launcher_prototype
 end

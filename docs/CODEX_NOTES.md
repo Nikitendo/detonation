@@ -1,8 +1,8 @@
 # CODEX Notes
 
 ## Factorio API Facts (Verified)
-- Source: local docs `E:\SteamLibrary\steamapps\common\Factorio\doc-html`
-- Verified against docs version: `2.0.76`
+- Source: local docs `D:\SteamLibrary\steamapps\common\Factorio\doc-html`
+- Latest verification: `2.1.8`
 
 ### `get_contents()` return type in 2.0.76
 - `LuaInventory::get_contents() -> ItemWithQualityCounts`
@@ -66,14 +66,22 @@ Practical implication:
   - `duration :: uint32?`
   - `source_offset :: Vector?`
 
-### Launcher-control facts in 2.0.76
+### Launcher-control facts in 2.1.8
 - `LuaControl.shooting_state` is writable.
 - `LuaControl.shooting_state.position` is the cursor/aim position being shot at.
 - `LuaEntity.selected_gun_index` is writable for:
   - `Character`
   - `Car`
   - `SpiderVehicle`
-- `LuaItemPrototype` runtime docs do not expose gun `attack_parameters`.
+- `LuaItemPrototype::attack_parameters -> AttackParameters?` is available for
+  gun items at runtime.
+- `AttackParameters` exposes:
+  - `ammo_categories`
+  - `type`
+  - `min_range`
+  - `range`
+- `LuaItemPrototype::get_ammo_type("player")` exposes the player-specific
+  `AmmoType`, including `range_modifier`.
 - `LuaEntity::can_shoot(target, position)` is documented on `LuaEntity` and takes:
   - `target :: LuaEntity`
   - `position :: MapPosition`
@@ -81,14 +89,19 @@ Practical implication:
 - `LuaEntity::render_player` and `LuaEntity::render_to_forces` are documented for
   `simple-entity-with-owner`, `simple-entity-with-force`, and `highlight-box`, not
   for `Character`.
-- The visibility/rendering facts above were checked against local docs `2.0.76`.
+- The visibility/rendering facts above were checked against local docs `2.1.8`.
 
 Practical implication:
 - There is a possible runtime path where a temporary real launcher entity performs
   a vanilla shot instead of the mod recreating launcher semantics by hand.
-- Launcher discovery can not rely on runtime gun prototype metadata alone; for
-  dynamic compatibility it must be tested empirically through real inventories
-  and `can_shoot(...)`.
+- Launcher discovery first filters gun prototypes by
+  `attack_parameters.ammo_categories`.
+- Effective maximum range is `attack_parameters.range *
+  ammo_type.range_modifier`; `min_range` is not affected by the ammo modifier.
+- Cache launcher identity by ammo category, but calculate effective range per
+  ammo item; different items in one category may have different range modifiers.
+- The practical temporary-character `can_shoot(...)` check remains as final
+  validation for inventory compatibility, target semantics, and modded weapons.
 - Position-targeted launcher families still need practical runtime testing because
   the docs do not clarify whether `target` may be omitted when only position
   aiming matters.
@@ -120,9 +133,9 @@ Practical implication:
 - Launcher discovery for `flamethrower-ammo` must not use a dummy target closer
   than 3 tiles or `can_shoot(...)` will reject the candidate even when the gun
   is otherwise valid.
-- Stream-family launcher discovery can also probe the real shootable envelope by
-  walking `can_shoot(...)` across increasing position distances and storing the
-  first/last distance that the real launcher accepts.
+- Stream-family launcher discovery reads the shootable envelope from
+  `attack_parameters.min_range` and the ammo-adjusted maximum range, then uses
+  `can_shoot(...)` once as final validation.
 - Real runtime stream shots should prefer an outward position target from the
   blast center instead of snapping to a nearby entity, otherwise the flame can
   visibly originate around the blast and travel back inward.

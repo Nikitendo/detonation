@@ -717,6 +717,7 @@ local function build_payload_specs()
           and compile_projectile_spec(scanned.projectile_name, scanned.delivery_kind)
           or compile_action_delivery_spec(scanned.action_root, scanned.family, scanned.delivery_kind)
       local launcher = scanned.ammo_category and launcher_catalog[scanned.ammo_category]
+      local launcher_min_distance, launcher_max_distance = Launcher.resolve_range(launcher, item_name)
       local magazine_size = resolve_item_magazine_size(prototype, scanned.manual)
       local charges = compute_item_charges(prototype, scanned.manual, scanned.family)
       ITEM_SPECS[item_name] = {
@@ -733,8 +734,8 @@ local function build_payload_specs()
         current_executor          = scanned.current_executor,
         target_executor           = scanned.target_executor,
         launcher_prototype        = launcher and launcher.name or nil,
-        launcher_min_distance     = launcher and launcher.min_distance or nil,
-        launcher_max_distance     = launcher and launcher.max_distance or nil,
+        launcher_min_distance     = launcher_min_distance,
+        launcher_max_distance     = launcher_max_distance,
       }
 
       if not scanned.ammo_category then
