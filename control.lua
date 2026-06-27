@@ -1133,6 +1133,7 @@ end
 local function can_use_as_projectile_target(candidate, excluded_entity)
   if not (candidate and candidate.valid) then return false end
   if excluded_entity and candidate == excluded_entity then return false end
+  if Launcher.is_host_entity(candidate) then return false end
 
   local ok, health = pcall(function() return candidate.health end)
   return ok and health ~= nil
@@ -1233,6 +1234,17 @@ local function execute_real_launcher_fallback(job, reason)
       .. " quality=" .. tostring(job.item_quality)
       .. " reason=" .. tostring(reason)
     )
+  end
+
+  if Launcher.is_family_enabled(job.family) then
+    if debug_enabled() then
+      Debug.log(
+        "[DETONATION][LAUNCHER][ABORT] family=" .. tostring(job.family)
+        .. " projectile=" .. tostring(job.projectile_name)
+        .. " reason=real-launcher family enabled; direct fallback suppressed"
+      )
+    end
+    return
   end
 
   if job.current_executor ~= EXECUTOR_DIRECT_SPAWN or not job.spawn_entity_name then
@@ -1411,8 +1423,16 @@ local function execute_emit_job(job)
     )
   end
 
-  if node.current_executor == EXECUTOR_DIRECT_SPAWN then
+  local suppress_direct_fallback = node.target_executor == EXECUTOR_REAL_LAUNCHER
+      and Launcher.is_family_enabled(node.family)
+  if node.current_executor == EXECUTOR_DIRECT_SPAWN and not suppress_direct_fallback then
     spawn_projectile(surface, center, target, job.distance, node, job.speed, force, job.cause)
+  elseif suppress_direct_fallback and debug_enabled() then
+    Debug.log(
+      "[DETONATION][LAUNCHER][ABORT] family=" .. tostring(node.family)
+      .. " projectile=" .. tostring(node.projectile_name)
+      .. " reason=real-launcher family enabled; direct fallback suppressed"
+    )
   end
 end
 

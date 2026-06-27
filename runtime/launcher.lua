@@ -188,6 +188,10 @@ function Launcher.family_names()
   }
 end
 
+function Launcher.is_host_entity(entity)
+  return entity and entity.valid and entity.name == HOST_CHARACTER
+end
+
 destroy_entity = function(entity)
   if entity and entity.valid then
     pcall(function() entity.destroy() end)
