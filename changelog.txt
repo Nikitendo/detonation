@@ -1,4 +1,22 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+Date: 2026-06-27
+  Features:
+    - [circuit-detonator] add circuit-controlled chest detonation
+    - [circuit-detonator] preserve settings when copied or blueprinted
+    - [launcher] add launcher-sensitive execution path
+  Gui:
+    - [circuit-detonator] add chest condition editor
+  Optimizations:
+    - [launcher] split pending jobs into family queues
+    - skip emit schedule for simple payload bursts
+  Compatibility:
+    - require Factorio 2.1
+  Bugfixes:
+    - [launcher] preserve queued stream launches
+    - [launcher] resolve ranges per ammo item
+    - [launcher] suppress direct fallback for launcher families
+---------------------------------------------------------------------------------------------------
 Version: 0.1.8
 Date: 2026-06-05
   Bugfixes:
