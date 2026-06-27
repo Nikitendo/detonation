@@ -5,6 +5,7 @@
 
 local Debug = require("debug")
 local Distribution = require("distribution")
+local Launcher = require("runtime.launcher")
 local debug_enabled = Debug.enabled
 
 local math_floor = math.floor
@@ -12,10 +13,8 @@ local math_max = math.max
 local math_min = math.min
 local math_log = math.log
 local math_cos = math.cos
-local math_sin = math.sin
 local math_sqrt = math.sqrt
 local table_sort = table.sort
-local TWO_PI = 2 * math.pi
 
 local DEFAULT_PROJECTILE_DAMAGE = 50
 local DEFAULT_FORCE_NAME = "player"
@@ -28,39 +27,15 @@ local PROJECTILE_SPEED_SIGMA = (MAX_PROJECTILE_SPEED - MIN_PROJECTILE_SPEED) / 6
 local EMIT_SCHEDULE_JITTER_SCALE = 100000
 
 local EXECUTOR_DIRECT_SPAWN = "direct-spawn"
-local EXECUTOR_REAL_LAUNCHER = "real-launcher"
+local EXECUTOR_REAL_LAUNCHER = Launcher.EXECUTOR
 local EXECUTOR_SKIPPED = "skipped"
 
 local FAMILY_DIRECT_PROJECTILE = "direct-projectile"
 local FAMILY_CAPSULE_PROJECTILE = "capsule-projectile"
-local FAMILY_LAUNCHER_STREAM = "launcher-stream"
-local FAMILY_LAUNCHER_LINE = "launcher-line"
-local FAMILY_LAUNCHER_COMPOSITE_BEAM = "launcher-composite-beam"
+local FAMILY_LAUNCHER_STREAM = Launcher.FAMILY_STREAM
+local FAMILY_LAUNCHER_LINE = Launcher.FAMILY_LINE
+local FAMILY_LAUNCHER_COMPOSITE_BEAM = Launcher.FAMILY_COMPOSITE_BEAM
 local FAMILY_UNKNOWN = "unknown"
-
-local REAL_LAUNCHER_HOST_CHARACTER = "detonation-invisible-character"
-local REAL_LAUNCHER_SPAWN_DELAY = 1
-local REAL_LAUNCHER_DEFAULT_FIRE_TICKS = 1
-local REAL_LAUNCHER_DEFAULT_CLEANUP_TICKS = 2
-local REAL_LAUNCHER_MAX_STARTS_PER_TICK = 1
-local REAL_LAUNCHER_DISCOVERY_TARGET_OFFSET = 6
-local REAL_LAUNCHER_STREAM_MIN_AIM_DISTANCE = 4.0
-local REAL_LAUNCHER_STREAM_MIN_FIRE_TICKS = 20
-local REAL_LAUNCHER_STREAM_MAX_FIRE_TICKS = 120
-local REAL_LAUNCHER_STREAM_RETARGET_INTERVAL_TICKS = 5
-local REAL_LAUNCHER_STREAM_RETARGET_MAX_ANGLE_OFFSET = math.pi * 10
-local REAL_LAUNCHER_STREAM_RETARGET_MAX_DISTANCE_OFFSET = 2.0
-local REAL_LAUNCHER_RANGE_PROBE_MAX_DISTANCE = 64
-local REAL_LAUNCHER_HOST_SEARCH_RADIUS = 1.5
-local REAL_LAUNCHER_HOST_SEARCH_PRECISION = 0.25
-
-local REAL_LAUNCHER_ENABLED_FAMILIES = {
-  [FAMILY_LAUNCHER_STREAM] = true,
-  [FAMILY_LAUNCHER_COMPOSITE_BEAM] = true,
-  [FAMILY_LAUNCHER_LINE] = true,
-}
-
-local REAL_LAUNCHER_GATE_DEFAULTS_VERSION = 3
 
 local MANUAL_ITEM_SPECS = {
   ["explosives"]       = { projectile = "cluster-grenade", ammo_category = "grenade" },
@@ -87,14 +62,11 @@ local DELIVERY_SCAN_KEYS = {
 local ITEM_SPECS = nil
 local PROJECTILE_SPECS = nil
 local ENTITY_CAPS = nil
-local LAUNCHER_CATALOG = nil
 local find_damage_in_action
 local process_tick
 local ensure_tick_handler
 local refresh_tick_handler
 local tick_handler_registered = false
-local destroy_real_launcher_entity
-local set_real_launcher_flags
 
 -- NOTE FOR FUTURE MAINTAINERS (verified against local Factorio docs 2.0.73):
 -- LuaInventory::get_contents() and LuaTransportLine::get_contents() return
@@ -210,11 +182,6 @@ local function is_valid_entity_reference(value)
   return ok_valid and valid == true
 end
 
-local function real_launcher_family_accepts_position_target(family)
-  return family == FAMILY_LAUNCHER_STREAM
-      or family == FAMILY_LAUNCHER_LINE
-end
-
 local function sanitize_entity_reference(value)
   if not is_valid_entity_reference(value) then return nil end
   return value
@@ -267,28 +234,10 @@ local function normalize_random_seed(seed)
   return wrapped + 1
 end
 
-local function default_real_launcher_enabled_families()
-  local enabled = {}
-  for family, value in pairs(REAL_LAUNCHER_ENABLED_FAMILIES) do
-    enabled[family] = value == true
-  end
-  return enabled
-end
-
 local function initialize_runtime_storage()
-  storage.launcher_jobs = storage.launcher_jobs or {}
+  Launcher.initialize_storage()
   storage.emit_jobs = storage.emit_jobs or {}
   storage.emit_job_count = storage.emit_job_count or 0
-  storage.real_launcher_enabled_families = storage.real_launcher_enabled_families or
-      default_real_launcher_enabled_families()
-
-  local defaults_version = storage.real_launcher_gate_defaults_version or 0
-  if defaults_version < REAL_LAUNCHER_GATE_DEFAULTS_VERSION then
-    storage.real_launcher_enabled_families[FAMILY_LAUNCHER_STREAM] = true
-    storage.real_launcher_enabled_families[FAMILY_LAUNCHER_COMPOSITE_BEAM] = true
-    storage.real_launcher_enabled_families[FAMILY_LAUNCHER_LINE] = true
-    storage.real_launcher_gate_defaults_version = REAL_LAUNCHER_GATE_DEFAULTS_VERSION
-  end
 end
 
 local function has_pending_emit_jobs()
@@ -304,15 +253,8 @@ local function has_pending_emit_jobs()
   return false
 end
 
-local function has_pending_launcher_jobs()
-  if not storage then return false end
-
-  local jobs = storage.launcher_jobs
-  return jobs ~= nil and #jobs > 0
-end
-
 local function has_pending_tick_work()
-  return has_pending_emit_jobs() or has_pending_launcher_jobs()
+  return has_pending_emit_jobs() or Launcher.has_pending_jobs()
 end
 
 ensure_tick_handler = function()
@@ -328,20 +270,6 @@ refresh_tick_handler = function()
     script.on_event(defines.events.on_tick, nil)
     tick_handler_registered = false
   end
-end
-
-local function get_real_launcher_enabled_families()
-  local enabled = storage.real_launcher_enabled_families
-  if type(enabled) == "table" then return enabled end
-  return REAL_LAUNCHER_ENABLED_FAMILIES
-end
-
-local function is_real_launcher_family_enabled(family)
-  local enabled = get_real_launcher_enabled_families()
-  if enabled and enabled[family] ~= nil then
-    return enabled[family] == true
-  end
-  return REAL_LAUNCHER_ENABLED_FAMILIES[family] == true
 end
 
 local function resolve_projectile_cause_entity(entity)
@@ -492,288 +420,6 @@ local function new_action_features()
     has_line = false,
     has_nested_result = false,
   }
-end
-
-local function is_hidden_item_prototype(prototype)
-  local ok_hidden, hidden = pcall(function() return prototype.has_flag("hidden") end)
-  if ok_hidden then return hidden == true end
-  return safe_table_index(prototype, "hidden") == true
-end
-
-local function choose_launcher_catalog_entry(existing, item_name, prototype, min_distance, max_distance)
-  local hidden = is_hidden_item_prototype(prototype)
-  if not existing
-      or (existing.hidden and not hidden)
-      or (existing.hidden == hidden and item_name < existing.name)
-  then
-    return {
-      name = item_name,
-      hidden = hidden,
-      min_distance = min_distance,
-      max_distance = max_distance,
-    }
-  end
-
-  return existing
-end
-
-local function find_launcher_discovery_surface()
-  local surface = game.get_surface(1)
-  if surface then return surface end
-
-  for _, candidate in pairs(game.surfaces) do
-    return candidate
-  end
-
-  return nil
-end
-
-local function find_non_colliding_position_safe(surface, entity_name, position, radius, precision)
-  local ok_pos, found = pcall(function()
-    return surface.find_non_colliding_position(entity_name, position, radius, precision)
-  end)
-  if not ok_pos then return nil end
-  return found
-end
-
-local function clear_inventory_safe(inventory)
-  if not (inventory and inventory.valid) then return end
-  pcall(function() inventory.clear() end)
-end
-
-local function destroy_launcher_discovery_context(context)
-  if not context then return end
-  clear_inventory_safe(context.guns)
-  clear_inventory_safe(context.ammo)
-  destroy_real_launcher_entity(context.launcher)
-  destroy_real_launcher_entity(context.target)
-end
-
-local function try_real_launcher_can_shoot(launcher, family, target_entity, target_position)
-  if not (launcher and launcher.valid and is_map_position(target_position)) then return false end
-
-  if target_entity then
-    local ok_can_shoot, can_shoot = pcall(function()
-      return launcher.can_shoot(target_entity, target_position)
-    end)
-    return ok_can_shoot and can_shoot == true
-  end
-
-  if not real_launcher_family_accepts_position_target(family) then return false end
-
-  local ok_can_shoot, can_shoot = pcall(function()
-    return launcher.can_shoot(nil, target_position)
-  end)
-  if ok_can_shoot and can_shoot then
-    return true
-  end
-
-  if family ~= FAMILY_LAUNCHER_STREAM then
-    return false
-  end
-
-  ok_can_shoot, can_shoot = pcall(function()
-    return launcher.can_shoot(launcher, target_position)
-  end)
-  return ok_can_shoot and can_shoot == true
-end
-
-local function create_launcher_discovery_context(surface, force)
-  if not surface then return nil, "missing surface" end
-  if not (force and force.valid) then return nil, "missing force" end
-
-  local host_position = find_non_colliding_position_safe(surface, REAL_LAUNCHER_HOST_CHARACTER, { x = 0, y = 0 }, 128,
-    0.5)
-  if not host_position then return nil, "host position unavailable" end
-
-  local target_position = find_non_colliding_position_safe(
-    surface,
-    "steel-chest",
-    { x = host_position.x + REAL_LAUNCHER_DISCOVERY_TARGET_OFFSET, y = host_position.y },
-    16,
-    0.5
-  )
-  if not target_position then return nil, "target position unavailable" end
-
-  local ok_target, target = pcall(function()
-    return surface.create_entity {
-      name = "steel-chest",
-      position = target_position,
-      force = game.forces.enemy or game.forces.neutral,
-      create_build_effect_smoke = false,
-    }
-  end)
-  if not ok_target or not target then
-    return nil, "discovery target create failed"
-  end
-
-  local ok_launcher, launcher = pcall(function()
-    return surface.create_entity {
-      name = REAL_LAUNCHER_HOST_CHARACTER,
-      position = host_position,
-      force = force,
-      create_build_effect_smoke = false,
-    }
-  end)
-  if not ok_launcher or not launcher then
-    destroy_real_launcher_entity(target)
-    return nil, "discovery launcher create failed"
-  end
-
-  set_real_launcher_flags(launcher)
-  pcall(function() target.destructible = false end)
-  pcall(function() target.minable = false end)
-
-  local guns = launcher.get_inventory(defines.inventory.character_guns)
-  local ammo = launcher.get_inventory(defines.inventory.character_ammo)
-  if not (guns and ammo) then
-    destroy_real_launcher_entity(launcher)
-    destroy_real_launcher_entity(target)
-    return nil, "discovery inventories unavailable"
-  end
-
-  return {
-    launcher = launcher,
-    target = target,
-    guns = guns,
-    ammo = ammo,
-  }
-end
-
-local function measure_real_launcher_range(context, family)
-  if family ~= FAMILY_LAUNCHER_STREAM then return nil, nil end
-  if not (context and context.launcher and context.launcher.valid) then return nil, nil end
-
-  local source_position = copy_position(context.launcher.position)
-  if not source_position then return nil, nil end
-
-  local min_distance = nil
-  local max_distance = nil
-
-  for probe_distance = 1, REAL_LAUNCHER_RANGE_PROBE_MAX_DISTANCE do
-    local probe_position = {
-      x = source_position.x + probe_distance,
-      y = source_position.y,
-    }
-    if try_real_launcher_can_shoot(context.launcher, family, nil, probe_position) then
-      min_distance = min_distance or probe_distance
-      max_distance = probe_distance
-    end
-  end
-
-  return min_distance, max_distance
-end
-
-local function discover_launcher_for_ammo_item(surface, force, ammo_item_name, ammo_category, family)
-  local context, reason = create_launcher_discovery_context(surface, force)
-  if not context then
-    Debug.log(
-      "[DETONATION][LAUNCHER][DISCOVER][ERROR] ammo=" .. tostring(ammo_item_name)
-      .. " category=" .. tostring(ammo_category)
-      .. " reason=" .. tostring(reason)
-    )
-    return nil
-  end
-
-  local best = nil
-
-  for item_name, prototype in pairs(prototypes.item) do
-    clear_inventory_safe(context.guns)
-    clear_inventory_safe(context.ammo)
-
-    local ok_can_insert, can_insert = pcall(function()
-      return context.guns.can_insert { name = item_name, count = 1 }
-    end)
-    if ok_can_insert and can_insert then
-      local inserted_gun = context.guns.insert { name = item_name, count = 1 }
-      local inserted_ammo = context.ammo.insert { name = ammo_item_name, count = 1 }
-      if inserted_gun > 0 and inserted_ammo > 0 then
-        local ok_selected = pcall(function() context.launcher.selected_gun_index = 1 end)
-        local ok_can_shoot, can_shoot = pcall(function()
-          return context.launcher.can_shoot(context.target, context.target.position)
-        end)
-        if ok_selected and ok_can_shoot and can_shoot then
-          local min_distance, max_distance = measure_real_launcher_range(context, family)
-          best = choose_launcher_catalog_entry(best, item_name, prototype, min_distance, max_distance)
-        end
-      end
-    end
-  end
-
-  destroy_launcher_discovery_context(context)
-
-  if best then
-    Debug.log(
-      "[DETONATION][LAUNCHER][DISCOVER][OK] ammo=" .. tostring(ammo_item_name)
-      .. " category=" .. tostring(ammo_category)
-      .. " launcher=" .. tostring(best.name)
-      .. (best.max_distance and (" range=" .. tostring(best.min_distance or "?") .. "-" .. tostring(best.max_distance)) or "")
-    )
-  else
-    Debug.log(
-      "[DETONATION][LAUNCHER][DISCOVER][MISS] ammo=" .. tostring(ammo_item_name)
-      .. " category=" .. tostring(ammo_category)
-    )
-  end
-
-  return best
-end
-
-local function build_launcher_catalog(required_ammo_items)
-  local catalog = {}
-  local surface = find_launcher_discovery_surface()
-  local force = resolve_default_force()
-
-  for ammo_category, launcher_request in pairs(required_ammo_items or {}) do
-    local ammo_item_name = type(launcher_request) == "table" and launcher_request.item_name or launcher_request
-    local family = type(launcher_request) == "table" and launcher_request.family or nil
-    local launcher = discover_launcher_for_ammo_item(surface, force, ammo_item_name, ammo_category, family)
-    if launcher then
-      catalog[ammo_category] = launcher
-    else
-      Debug.log(
-        "[DETONATION][LAUNCHER][DISCOVER][UNRESOLVED] ammo=" .. tostring(ammo_item_name)
-        .. " category=" .. tostring(ammo_category)
-      )
-    end
-  end
-
-  return catalog
-end
-
-local function apply_launcher_catalog_entry(spec, launcher)
-  if not (spec and launcher) then return end
-  if launcher.name then
-    spec.launcher_prototype = launcher.name
-  end
-  if type(launcher.min_distance) == "number" then
-    spec.launcher_min_distance = launcher.min_distance
-  end
-  if type(launcher.max_distance) == "number" then
-    spec.launcher_max_distance = launcher.max_distance
-  end
-end
-
-local function resolve_launcher_prototype_for_node(surface, force, node)
-  if node.target_executor ~= EXECUTOR_REAL_LAUNCHER then return nil end
-  if not node.ammo_category or not node.item_name then return nil end
-  if not (surface and force) then return node.launcher_prototype end
-
-  local launcher = LAUNCHER_CATALOG and LAUNCHER_CATALOG[node.ammo_category] or nil
-  if not launcher then
-    launcher = discover_launcher_for_ammo_item(surface, force, node.item_name, node.ammo_category, node.family)
-    if launcher then
-      LAUNCHER_CATALOG = LAUNCHER_CATALOG or {}
-      LAUNCHER_CATALOG[node.ammo_category] = launcher
-    end
-  end
-
-  if launcher then
-    apply_launcher_catalog_entry(node, launcher)
-    apply_launcher_catalog_entry(ITEM_SPECS and ITEM_SPECS[node.item_name] or nil, launcher)
-  end
-
-  return node.launcher_prototype
 end
 
 local function classify_item_family(prototype, projectile_name, delivery_kind, features)
@@ -1059,7 +705,7 @@ local function build_payload_specs()
     end
   end
 
-  LAUNCHER_CATALOG = build_launcher_catalog(required_launcher_items)
+  local launcher_catalog = Launcher.build_catalog(required_launcher_items)
 
   for i = 1, #scanned_specs do
     local scanned = scanned_specs[i]
@@ -1070,7 +716,7 @@ local function build_payload_specs()
       local delivery_spec = scanned.projectile_name
           and compile_projectile_spec(scanned.projectile_name, scanned.delivery_kind)
           or compile_action_delivery_spec(scanned.action_root, scanned.family, scanned.delivery_kind)
-      local launcher = scanned.ammo_category and LAUNCHER_CATALOG[scanned.ammo_category]
+      local launcher = scanned.ammo_category and launcher_catalog[scanned.ammo_category]
       local magazine_size = resolve_item_magazine_size(prototype, scanned.manual)
       local charges = compute_item_charges(prototype, scanned.manual, scanned.family)
       ITEM_SPECS[item_name] = {
@@ -1507,62 +1153,9 @@ local function resolve_final_target(surface, target_pos, rng, excluded_entity)
   return target_pos
 end
 
-local function resolve_stream_aim_limits(node)
-  local launcher_min_distance = type(node and node.launcher_min_distance) == "number" and node.launcher_min_distance or 0
-  local launcher_max_distance = type(node and node.launcher_max_distance) == "number" and node.launcher_max_distance or
-      nil
-  local min_aim_distance = math_max(REAL_LAUNCHER_STREAM_MIN_AIM_DISTANCE, launcher_min_distance)
-  if launcher_max_distance and launcher_max_distance < min_aim_distance then
-    launcher_max_distance = min_aim_distance
-  end
-  return min_aim_distance, launcher_max_distance
-end
-
-local function resolve_stream_direction(source_position, target_position, rng)
-  local dx = target_position.x - source_position.x
-  local dy = target_position.y - source_position.y
-  local distance = math_sqrt(dx * dx + dy * dy)
-  if distance <= 0.001 then
-    local angle = rng() * TWO_PI
-    return math_cos(angle), math_sin(angle), 0
-  end
-  return dx / distance, dy / distance, distance
-end
-
-local function sample_uniform_annulus_distance(min_aim_distance, max_aim_distance, rng)
-  if type(max_aim_distance) ~= "number" or max_aim_distance <= min_aim_distance then
-    return min_aim_distance
-  end
-
-  local min_sq = min_aim_distance * min_aim_distance
-  local max_sq = max_aim_distance * max_aim_distance
-  return math_sqrt(min_sq + rng() * (max_sq - min_sq))
-end
-
-local function build_stream_target_position(source_position, direction_x, direction_y, aim_distance)
-  return {
-    x = source_position.x + direction_x * aim_distance,
-    y = source_position.y + direction_y * aim_distance,
-  }
-end
-
-local function resolve_stream_target(node, center, sampled_target, sampled_distance, rng)
-  local source_position = copy_position(center)
-  local target_position = copy_position(sampled_target)
-  if not source_position or not target_position then
-    return sampled_target, sampled_distance
-  end
-
-  local min_aim_distance, max_aim_distance = resolve_stream_aim_limits(node)
-  local direction_x, direction_y = resolve_stream_direction(source_position, target_position, rng)
-  local aim_distance = sample_uniform_annulus_distance(min_aim_distance, max_aim_distance, rng)
-
-  return build_stream_target_position(source_position, direction_x, direction_y, aim_distance), aim_distance
-end
-
 local function resolve_emit_target(node, surface, center, sampled_target, sampled_distance, rng, excluded_entity)
   if node.family == FAMILY_LAUNCHER_STREAM then
-    return resolve_stream_target(node, center, sampled_target, sampled_distance, rng)
+    return Launcher.resolve_target(node, center, sampled_target, sampled_distance, rng)
   end
 
   return resolve_final_target(surface, sampled_target, rng, excluded_entity), sampled_distance
@@ -1626,174 +1219,6 @@ local function spawn_projectile(surface, center, target, distance, node, speed, 
   end
 end
 
-local function can_queue_real_launcher(node, target)
-  if node.target_executor ~= EXECUTOR_REAL_LAUNCHER then return false end
-  if not is_real_launcher_family_enabled(node.family) then return false end
-  if not node.launcher_prototype or not node.item_name then return false end
-
-  if is_valid_entity_reference(target) then return true end
-  if real_launcher_family_accepts_position_target(node.family) and is_map_position(target) then return true end
-  return false
-end
-
-local function explain_real_launcher_skip(node, target)
-  if node.target_executor ~= EXECUTOR_REAL_LAUNCHER then
-    return "not a real-launcher family"
-  end
-  if not is_real_launcher_family_enabled(node.family) then
-    return "family gate disabled"
-  end
-  if not node.launcher_prototype then
-    return "launcher prototype missing"
-  end
-  if not node.item_name then
-    return "source item missing"
-  end
-
-  if is_valid_entity_reference(target) then
-    return "enqueue rejected"
-  end
-
-  if real_launcher_family_accepts_position_target(node.family) and is_map_position(target) then
-    return "enqueue rejected"
-  end
-
-  return "target is neither a valid entity nor a supported position"
-end
-
-local function resolve_real_launcher_charge_count(node)
-  if uses_stream_job_budget(node) then
-    return math_max(1, node.real_launcher_charge_size or 1)
-  end
-
-  return 1
-end
-
-local function resolve_real_launcher_fire_ticks(node, charge_count)
-  if node.family == FAMILY_LAUNCHER_STREAM then
-    return math_min(
-      REAL_LAUNCHER_STREAM_MAX_FIRE_TICKS,
-      math_max(REAL_LAUNCHER_STREAM_MIN_FIRE_TICKS, charge_count)
-    )
-  end
-
-  return REAL_LAUNCHER_DEFAULT_FIRE_TICKS
-end
-
-local function compute_stream_retarget_seed(job, tick)
-  local seed = deterministic_seed(job.source_position or job.target_position or { x = 0, y = 0 }, tick)
-  if job.target_position then
-    seed = seed + math_floor(job.target_position.x * 1000) * 19349663
-    seed = seed + math_floor(job.target_position.y * 1000) * 83492791
-  end
-  return normalize_random_seed(seed)
-end
-
-local function sample_stream_retarget_position(job, tick)
-  local source_position = copy_position(job.source_position)
-  if not source_position then return nil end
-
-  local min_aim_distance = job.stream_min_distance or REAL_LAUNCHER_STREAM_MIN_AIM_DISTANCE
-  local max_aim_distance = job.stream_max_distance
-  local distance_span = type(max_aim_distance) == "number" and math_max(0, max_aim_distance - min_aim_distance) or 0
-  local max_distance_offset = math_min(REAL_LAUNCHER_STREAM_RETARGET_MAX_DISTANCE_OFFSET, distance_span * 0.5)
-  local rng = game.create_random_generator(compute_stream_retarget_seed(job, tick))
-
-  local angle_offset = (rng() * 2 - 1) * REAL_LAUNCHER_STREAM_RETARGET_MAX_ANGLE_OFFSET
-  local distance_offset = (rng() * 2 - 1) * max_distance_offset
-  local cos_offset = math_cos(angle_offset)
-  local sin_offset = math_sin(angle_offset)
-  local base_direction_x = job.stream_direction_x or 1
-  local base_direction_y = job.stream_direction_y or 0
-  local direction_x = base_direction_x * cos_offset - base_direction_y * sin_offset
-  local direction_y = base_direction_x * sin_offset + base_direction_y * cos_offset
-  local aim_distance = math_max(min_aim_distance, (job.stream_distance or min_aim_distance) + distance_offset)
-  if max_aim_distance then
-    aim_distance = math_min(aim_distance, max_aim_distance)
-  end
-
-  return build_stream_target_position(source_position, direction_x, direction_y, aim_distance), aim_distance, direction_x,
-      direction_y
-end
-
-local function enqueue_real_launcher_job(surface, center, target, distance, node, speed, force, cause, charge_count)
-  initialize_runtime_storage()
-
-  local target_position = copy_position(target and target.position) or copy_position(target)
-  if not target_position then return false end
-
-  local queued_charge_count = math_max(1, charge_count or 1)
-  local stream_min_distance, stream_max_distance = resolve_stream_aim_limits(node)
-  local stream_direction_x, stream_direction_y, stream_distance = 1, 0, stream_min_distance
-  if node.family == FAMILY_LAUNCHER_STREAM then
-    stream_direction_x, stream_direction_y, stream_distance = resolve_stream_direction(center, target_position,
-      game.create_random_generator(compute_stream_retarget_seed({
-        source_position = center,
-        target_position = target_position,
-      }, game.tick)))
-    stream_distance = math_max(stream_min_distance, stream_distance)
-    if stream_max_distance then
-      stream_distance = math_min(stream_distance, stream_max_distance)
-    end
-  end
-
-  storage.launcher_jobs[#storage.launcher_jobs + 1] = {
-    family = node.family,
-    launcher_prototype = node.launcher_prototype,
-    ammo_item_name = node.item_name,
-    item_quality = normalize_quality_name(node.item_quality),
-    surface_index = surface.index,
-    source_position = copy_position(center),
-    target = target,
-    target_position = target_position,
-    force = force,
-    cause = cause,
-    projectile_name = node.projectile_name,
-    spawn_entity_name = node.spawn_entity_name,
-    delivery_kind = node.delivery_kind,
-    ammo_category = node.ammo_category,
-    current_executor = node.current_executor,
-    distance = distance,
-    speed = speed,
-    charge_count = queued_charge_count,
-    ammo_count = 1,
-    fire_ticks = resolve_real_launcher_fire_ticks(node, queued_charge_count),
-    cleanup_delay = REAL_LAUNCHER_DEFAULT_CLEANUP_TICKS,
-    spawn_tick = game.tick + REAL_LAUNCHER_SPAWN_DELAY,
-    next_retarget_tick = nil,
-    release_tick = nil,
-    cleanup_tick = nil,
-    state = "pending",
-    launcher = nil,
-    stream_min_distance = stream_min_distance,
-    stream_max_distance = stream_max_distance,
-    stream_direction_x = stream_direction_x,
-    stream_direction_y = stream_direction_y,
-    stream_distance = stream_distance,
-  }
-
-  ensure_tick_handler()
-  return true
-end
-
-local function compute_real_launcher_host_seed_position(job)
-  local source_position = copy_position(job.source_position)
-  if not source_position then return nil, REAL_LAUNCHER_HOST_SEARCH_RADIUS end
-  return source_position, REAL_LAUNCHER_HOST_SEARCH_RADIUS
-end
-
-destroy_real_launcher_entity = function(entity)
-  if entity and entity.valid then
-    pcall(function() entity.destroy() end)
-  end
-end
-
-set_real_launcher_flags = function(entity)
-  pcall(function() entity.destructible = false end)
-  pcall(function() entity.operable = false end)
-  pcall(function() entity.minable = false end)
-end
-
 local function execute_real_launcher_fallback(job, reason)
   local surface = game.get_surface(job.surface_index)
   if not surface then return end
@@ -1830,190 +1255,6 @@ local function execute_real_launcher_fallback(job, reason)
   }
   for _ = 1, math_max(1, job.charge_count or 1) do
     spawn_projectile(surface, job.source_position, target, job.distance, fallback_node, job.speed, job.force, job.cause)
-  end
-end
-
-local function can_real_launcher_shoot(launcher, job, target_entity)
-  if job.family == FAMILY_LAUNCHER_LINE and not target_entity and is_map_position(job.target_position) then
-    return true
-  end
-
-  return try_real_launcher_can_shoot(launcher, job.family, target_entity, job.target_position)
-end
-
-local function maybe_retarget_stream_launcher(job, tick)
-  if job.family ~= FAMILY_LAUNCHER_STREAM then return end
-  if not (job.launcher and job.launcher.valid) then return end
-  if not job.next_retarget_tick or tick < job.next_retarget_tick then return end
-
-  job.next_retarget_tick = tick + REAL_LAUNCHER_STREAM_RETARGET_INTERVAL_TICKS
-
-  local target_position, aim_distance, direction_x, direction_y = sample_stream_retarget_position(job, tick)
-  if not target_position then return end
-  if not try_real_launcher_can_shoot(job.launcher, job.family, nil, target_position) then return end
-
-  local ok_shooting_state = pcall(function()
-    job.launcher.shooting_state = {
-      state = defines.shooting.shooting_selected,
-      position = target_position,
-    }
-  end)
-  if not ok_shooting_state then return end
-
-  job.target_position = target_position
-  job.stream_distance = aim_distance
-  job.stream_direction_x = direction_x
-  job.stream_direction_y = direction_y
-end
-
-local function prepare_real_launcher_job(job)
-  local surface = game.get_surface(job.surface_index)
-  if not surface then return false, "missing surface" end
-  if not job.target_position then return false, "missing target position" end
-
-  local seed_position, search_radius = compute_real_launcher_host_seed_position(job)
-  if not seed_position then return false, "host seed position unavailable" end
-  local ok_pos, spawn_position = pcall(function()
-    return surface.find_non_colliding_position(
-      REAL_LAUNCHER_HOST_CHARACTER,
-      seed_position,
-      search_radius,
-      REAL_LAUNCHER_HOST_SEARCH_PRECISION
-    )
-  end)
-  if not ok_pos then return false, "find_non_colliding_position failed" end
-  spawn_position = spawn_position or seed_position
-
-  local ok_create, launcher = pcall(function()
-    return surface.create_entity {
-      name = REAL_LAUNCHER_HOST_CHARACTER,
-      position = spawn_position,
-      force = job.force,
-      create_build_effect_smoke = false,
-    }
-  end)
-  if not ok_create or not launcher then
-    return false, "launcher host create failed"
-  end
-
-  job.launcher = launcher
-  set_real_launcher_flags(launcher)
-
-  local guns = launcher.get_inventory(defines.inventory.character_guns)
-  local ammo = launcher.get_inventory(defines.inventory.character_ammo)
-  if not (guns and ammo) then
-    destroy_real_launcher_entity(launcher)
-    job.launcher = nil
-    return false, "launcher inventories unavailable"
-  end
-
-  local gun_inserted = guns.insert { name = job.launcher_prototype, count = 1 }
-  local ammo_inserted = ammo.insert(item_stack_definition(job.ammo_item_name, job.ammo_count or 1, job.item_quality))
-  if gun_inserted < 1 or ammo_inserted < 1 then
-    destroy_real_launcher_entity(launcher)
-    job.launcher = nil
-    return false, "launcher inventory insert failed"
-  end
-
-  local ok_selected_gun = pcall(function() launcher.selected_gun_index = 1 end)
-  local target_entity = is_valid_entity_reference(job.target) and job.target or nil
-  if not ok_selected_gun or not can_real_launcher_shoot(launcher, job, target_entity) then
-    destroy_real_launcher_entity(launcher)
-    job.launcher = nil
-    return false, "launcher cannot shoot target"
-  end
-
-  if target_entity then
-    pcall(function() launcher.selected = target_entity end)
-  end
-  local ok_shooting_state = pcall(function()
-    launcher.shooting_state = {
-      state = defines.shooting.shooting_selected,
-      position = job.target_position,
-    }
-  end)
-  if not ok_shooting_state then
-    destroy_real_launcher_entity(launcher)
-    job.launcher = nil
-    return false, "shooting_state write failed"
-  end
-
-  if debug_enabled() then
-    Debug.log(
-      "[DETONATION][LAUNCHER][START] family=" .. tostring(job.family)
-      .. " projectile=" .. tostring(job.projectile_name)
-      .. " launcher=" .. tostring(job.launcher_prototype)
-      .. " ammo=" .. tostring(job.ammo_category)
-      .. " quality=" .. tostring(job.item_quality)
-      .. " charges=" .. tostring(job.charge_count)
-      .. " fire_ticks=" .. tostring(job.fire_ticks)
-      .. " force=" .. tostring(job.force and job.force.name)
-      .. " host=" .. describe_entity(launcher)
-      .. " source=" .. describe_position(job.source_position)
-      .. " target=" .. describe_target(job.target or job.target_position)
-    )
-  end
-
-  job.release_tick = game.tick + math_max(1, job.fire_ticks or REAL_LAUNCHER_DEFAULT_FIRE_TICKS)
-  job.cleanup_tick = job.release_tick + math_max(1, job.cleanup_delay or REAL_LAUNCHER_DEFAULT_CLEANUP_TICKS)
-  if job.family == FAMILY_LAUNCHER_STREAM then
-    job.next_retarget_tick = game.tick + REAL_LAUNCHER_STREAM_RETARGET_INTERVAL_TICKS
-  end
-  job.state = "firing"
-  return true
-end
-
-local function process_real_launcher_jobs(event)
-  local jobs = storage.launcher_jobs
-  if not jobs or #jobs == 0 then return end
-
-  for i = #jobs, 1, -1 do
-    local job = jobs[i]
-    if job.state == "firing" then
-      if event.tick >= job.release_tick then
-        if job.launcher and job.launcher.valid then
-          pcall(function()
-            job.launcher.shooting_state = {
-              state = defines.shooting.not_shooting,
-              position = job.target_position,
-            }
-          end)
-        end
-        job.state = "cleanup"
-      else
-        maybe_retarget_stream_launcher(job, event.tick)
-      end
-    elseif job.state == "cleanup" and event.tick >= job.cleanup_tick then
-      destroy_real_launcher_entity(job.launcher)
-      table.remove(jobs, i)
-    end
-  end
-
-  if #jobs == 0 then return end
-
-  local starts_remaining = REAL_LAUNCHER_MAX_STARTS_PER_TICK
-  local failed_indices = nil
-
-  for i = 1, #jobs do
-    if starts_remaining <= 0 then break end
-
-    local job = jobs[i]
-    if job.state == "pending" and event.tick >= job.spawn_tick then
-      local ok, reason = prepare_real_launcher_job(job)
-      if ok then
-        starts_remaining = starts_remaining - 1
-      else
-        execute_real_launcher_fallback(job, reason)
-        failed_indices = failed_indices or {}
-        failed_indices[#failed_indices + 1] = i
-      end
-    end
-  end
-
-  if not failed_indices then return end
-
-  for i = #failed_indices, 1, -1 do
-    table.remove(jobs, failed_indices[i])
   end
 end
 
@@ -2128,10 +1369,20 @@ local function execute_emit_job(job)
   local force = job.force or resolve_default_force()
   if not (node and center and target) then return end
 
-  local can_queue = can_queue_real_launcher(node, target)
+  local can_queue = Launcher.can_queue(node, target)
   if can_queue
-      and enqueue_real_launcher_job(surface, center, target, job.distance, node, job.speed, force, job.cause,
-        job.charge_count)
+      and Launcher.enqueue(
+        surface,
+        center,
+        target,
+        job.distance,
+        node,
+        job.speed,
+        force,
+        job.cause,
+        job.charge_count,
+        ensure_tick_handler
+      )
   then
     if debug_enabled() then
       Debug.log(
@@ -2154,7 +1405,7 @@ local function execute_emit_job(job)
       .. " launcher=" .. tostring(node.launcher_prototype)
       .. " quality=" .. tostring(node.item_quality)
       .. " charges=" .. tostring(job.charge_count)
-      .. " reason=" .. tostring(explain_real_launcher_skip(node, target))
+      .. " reason=" .. tostring(Launcher.explain_skip(node, target))
       .. " target=" .. describe_target(target)
     )
   end
@@ -2274,10 +1525,10 @@ local function emit_payload(surface, center, payload, excluded_entity, force, ca
       excluded_entity)
     local speed                        = compute_projectile_speed(rng, average_speed)
     local consumed_count               = 1
-    resolve_launcher_prototype_for_node(surface, attack_force, node)
-    local can_queue = can_queue_real_launcher(node, final_target)
+    Launcher.resolve_prototype(surface, attack_force, node, ITEM_SPECS)
+    local can_queue = Launcher.can_queue(node, final_target)
     if can_queue then
-      consumed_count = resolve_real_launcher_charge_count(node)
+      consumed_count = Launcher.resolve_charge_count(node)
     end
 
     local job = {
@@ -2311,7 +1562,7 @@ end
 local function rebuild_runtime_state()
   Debug.log("[DETONATION] Rebuilding runtime state")
   initialize_runtime_storage()
-  storage.launcher_jobs = {}
+  Launcher.reset_jobs()
   storage.emit_jobs = {}
   storage.emit_job_count = 0
   refresh_tick_handler()
@@ -2404,7 +1655,7 @@ end
 
 process_tick = function(event)
   process_staggered_emit_jobs(event)
-  process_real_launcher_jobs(event)
+  Launcher.process_jobs(event, execute_real_launcher_fallback)
   refresh_tick_handler()
 end
 
@@ -2412,11 +1663,6 @@ local function register_events()
   script.on_event(defines.events.on_entity_died, on_entity_died)
   script.on_event(defines.events.on_pre_player_died, on_pre_player_died)
   refresh_tick_handler()
-end
-
-local function set_real_launcher_family_enabled(family, enabled)
-  initialize_runtime_storage()
-  storage.real_launcher_enabled_families[family] = enabled == true
 end
 
 script.on_init(function()
@@ -2446,7 +1692,7 @@ commands.add_command("detonation_stats", "Show detonation runtime statistics", f
   game.print("Explosive items tracked: " .. table_size(ITEM_SPECS))
   game.print("Projectile specs cached: " .. table_size(PROJECTILE_SPECS))
   game.print("Entity capability cache: " .. table_size(ENTITY_CAPS))
-  game.print("Queued launcher jobs: " .. tostring(storage.launcher_jobs and #storage.launcher_jobs or 0))
+  game.print("Queued launcher jobs: " .. tostring(Launcher.queued_count()))
   game.print("Queued staggered shots: " .. tostring(storage.emit_job_count or 0))
 
   local inventory_types  = 0
@@ -2466,12 +1712,8 @@ end)
 
 commands.add_command("detonation_launcher_status", "Show real-launcher family gates", function()
   game.print("=== Detonation Launcher Families ===")
-  for _, family in ipairs({
-    FAMILY_LAUNCHER_COMPOSITE_BEAM,
-    FAMILY_LAUNCHER_STREAM,
-    FAMILY_LAUNCHER_LINE,
-  }) do
-    game.print(family .. " = " .. tostring(is_real_launcher_family_enabled(family)))
+  for _, family in ipairs(Launcher.family_names()) do
+    game.print(family .. " = " .. tostring(Launcher.is_family_enabled(family)))
   end
 end)
 
@@ -2481,7 +1723,7 @@ commands.add_command("detonation_launcher_enable", "Enable a real-launcher famil
     game.print("Usage: /detonation_launcher_enable <family>")
     return
   end
-  set_real_launcher_family_enabled(family, true)
+  Launcher.set_family_enabled(family, true)
   game.print("Enabled real-launcher family: " .. family)
 end)
 
@@ -2491,6 +1733,6 @@ commands.add_command("detonation_launcher_disable", "Disable a real-launcher fam
     game.print("Usage: /detonation_launcher_disable <family>")
     return
   end
-  set_real_launcher_family_enabled(family, false)
+  Launcher.set_family_enabled(family, false)
   game.print("Disabled real-launcher family: " .. family)
 end)

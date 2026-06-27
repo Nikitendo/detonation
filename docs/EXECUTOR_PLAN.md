@@ -82,6 +82,22 @@
 4. If launcher setup fails, the job falls back to the current direct-spawn executor for that shot.
 5. If launcher setup succeeds, the host is released and destroyed a few ticks later.
 
+## Runtime Module Boundary
+- `control.lua` owns payload compilation, detonation scheduling, executor
+  selection, and the direct-spawn fallback.
+- `runtime/launcher.lua` owns only launcher-sensitive behavior:
+  - family gates and launcher job storage;
+  - empirical launcher discovery and the launcher catalog;
+  - stream target normalization and retargeting;
+  - temporary launcher-host creation, firing, and cleanup.
+- The launcher module does not call the direct-spawn executor. When a delayed
+  launcher job fails, it returns the stored job to `control.lua` through a
+  callback so the existing fallback path remains the single owner of direct
+  projectile creation.
+- This extraction is intentionally behavior-preserving. Replacing empirical
+  discovery with `LuaItemPrototype::attack_parameters` is a separate follow-up
+  change after the three launcher families are verified in game.
+
 ## Runtime Launcher Discovery
 - Runtime docs do not expose gun `attack_parameters` on `LuaItemPrototype`, so launcher discovery can not be metadata-only.
 - Discovery therefore uses a temporary `character` plus temporary inventories:
