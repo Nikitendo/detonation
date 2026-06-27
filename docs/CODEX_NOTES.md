@@ -198,6 +198,31 @@ Practical implication:
 - `on_load()` should rebuild only local Lua references from existing `storage`
   state and fall back to read-only defaults when fields are absent.
 
+### Circuit-condition detonator proxy in 2.1.8
+- `LuaWireConnector::connect_to(target, reach_check?, origin?)` exists.
+- `defines.wire_origin.script` creates invisible script-owned wires.
+- There are no `on_wire_connected` / `on_wire_disconnected` events in 2.1.8.
+- `LuaControl::opened` is writable and can be assigned a `LuaEntity`.
+- `CircuitConditionDefinition::fulfilled` exists, but the first controlled
+  detonation prototype intentionally uses a hidden `land-mine` proxy instead
+  of polling `fulfilled` from Lua.
+
+Practical implication:
+- Connect the proxy mine to the chest once with red and green script wires.
+  Because the proxy is wired to the chest itself, later player wires attached
+  to the chest put both entities into the same circuit network without needing
+  wire-change events.
+- The proxy mine's own action must only kill the proxy. The real chest
+  detonation is performed by the normal `on_entity_died` path after the proxy
+  death handler kills the linked chest.
+- The proxy mine owns the vanilla circuit condition. To preserve controlled
+  detonation across normal Factorio ghost rebuilds, capture the proxy's
+  `circuit_condition`, `circuit_enable_disable`, and `input_networks` before
+  deleting it, attach that saved config to the death-created ghost in
+  `on_post_entity_died`, and restore it when `on_built_entity`,
+  `on_robot_built_entity`, or `script_raised_revive` creates the replacement
+  container.
+
 ## Mod Development Guardrails
 - Prefer dynamic discovery over hardcoded prototype names.
 - For belt-like entities, do not assume only vanilla belt types exist.

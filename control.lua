@@ -6,6 +6,7 @@
 local Debug = require("debug")
 local Distribution = require("distribution")
 local Launcher = require("runtime.launcher")
+local CircuitDetonator = require("runtime.circuit_detonator")
 local debug_enabled = Debug.enabled
 
 local math_floor = math.floor
@@ -236,6 +237,7 @@ end
 
 local function initialize_runtime_storage()
   Launcher.initialize_storage()
+  CircuitDetonator.initialize_storage()
   storage.emit_jobs = storage.emit_jobs or {}
   storage.emit_job_count = storage.emit_job_count or 0
 end
@@ -1689,10 +1691,23 @@ end
 local function on_entity_died(event)
   local entity = event.entity
   if not (entity and entity.valid) then return end
+  if CircuitDetonator.is_proxy(entity) then
+    local chest = CircuitDetonator.take_chest_for_dead_proxy(entity)
+    if chest and chest.valid then
+      local force = resolve_entity_force(chest) or resolve_default_force()
+      if not chest.die(force, entity) then
+        Debug.log("[DETONATION][CIRCUIT] Failed to kill linked chest " .. describe_entity(chest))
+      end
+    end
+    return
+  end
+
   if entity.type == "character" then
     Debug.log("[DETONATION][EVENT] on_entity_died skipped character entity")
     return
   end
+
+  CircuitDetonator.prepare_container_death(entity, event.tick)
 
   if debug_enabled() then
     Debug.log(
@@ -1727,6 +1742,25 @@ local function on_entity_died(event)
   end
 end
 
+local function on_entity_removed_without_death(event)
+  local entity = event.entity
+  if entity and entity.valid then
+    CircuitDetonator.cleanup_entity(entity)
+  end
+end
+
+local function on_entity_built(event)
+  local entity = event.entity
+  if entity and entity.valid then
+    CircuitDetonator.restore_for_built_entity(entity)
+  end
+end
+
+local function on_gui_click(event)
+  if CircuitDetonator.on_gui_click(event) then return end
+  Debug.on_gui_click(event)
+end
+
 process_tick = function(event)
   process_staggered_emit_jobs(event)
   Launcher.process_jobs(event, execute_real_launcher_fallback)
@@ -1735,7 +1769,30 @@ end
 
 local function register_events()
   script.on_event(defines.events.on_entity_died, on_entity_died)
+  script.on_event(defines.events.on_post_entity_died, CircuitDetonator.on_post_entity_died, {
+    { filter = "type", type = "container" },
+    { filter = "type", type = "logistic-container" },
+  })
   script.on_event(defines.events.on_pre_player_died, on_pre_player_died)
+  script.on_event(defines.events.on_gui_opened, CircuitDetonator.on_gui_opened)
+  script.on_event(defines.events.on_gui_closed, CircuitDetonator.on_gui_closed)
+  script.on_event(defines.events.on_gui_click, on_gui_click)
+  script.on_event(defines.events.on_built_entity, on_entity_built, {
+    { filter = "type", type = "container" },
+    { filter = "type", type = "logistic-container" },
+  })
+  script.on_event(defines.events.on_robot_built_entity, on_entity_built, {
+    { filter = "type", type = "container" },
+    { filter = "type", type = "logistic-container" },
+  })
+  script.on_event(defines.events.script_raised_revive, on_entity_built, {
+    { filter = "type", type = "container" },
+    { filter = "type", type = "logistic-container" },
+  })
+  script.on_event(defines.events.on_pre_player_mined_item, on_entity_removed_without_death)
+  script.on_event(defines.events.on_robot_pre_mined, on_entity_removed_without_death)
+  script.on_event(defines.events.on_pre_ghost_deconstructed, CircuitDetonator.on_pre_ghost_deconstructed)
+  script.on_event(defines.events.script_raised_destroy, on_entity_removed_without_death)
   refresh_tick_handler()
 end
 
@@ -1809,4 +1866,19 @@ commands.add_command("detonation_launcher_disable", "Disable a real-launcher fam
   end
   Launcher.set_family_enabled(family, false)
   game.print("Disabled real-launcher family: " .. family)
+end)
+
+commands.add_command("detonation_detonator_arm", "Create a circuit detonator proxy for the selected chest", function(event)
+  local player = game.get_player(event.player_index)
+  CircuitDetonator.arm_selected(player)
+end)
+
+commands.add_command("detonation_detonator_open", "Open the selected chest's circuit detonator condition GUI", function(event)
+  local player = game.get_player(event.player_index)
+  CircuitDetonator.open_selected(player)
+end)
+
+commands.add_command("detonation_detonator_remove", "Remove the selected chest's circuit detonator proxy", function(event)
+  local player = game.get_player(event.player_index)
+  CircuitDetonator.remove_selected(player)
 end)

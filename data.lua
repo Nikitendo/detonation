@@ -1,4 +1,5 @@
 local REAL_LAUNCHER_HOST_CHARACTER = "detonation-invisible-character"
+local CIRCUIT_DETONATOR_PROXY = "detonation-circuit-detonator-proxy"
 local INVISIBLE_CHARACTER_SHEET = "__detonation__/graphics/invisible-character.png"
 
 local function add_flag(flags, flag)
@@ -17,6 +18,15 @@ local function empty_character_animation(frame_count, direction_count)
     frame_count = frame_count,
     direction_count = direction_count,
     animation_speed = 1,
+  }
+end
+
+local function empty_sprite()
+  return {
+    filename = INVISIBLE_CHARACTER_SHEET,
+    width = 1,
+    height = 1,
+    priority = "low",
   }
 end
 
@@ -58,4 +68,54 @@ if base_character then
   invisible_character.water_reflection = nil
 
   data:extend { invisible_character }
+end
+
+local base_land_mine = data.raw["land-mine"] and data.raw["land-mine"]["land-mine"]
+if base_land_mine then
+  local proxy = table.deepcopy(base_land_mine)
+  proxy.name = CIRCUIT_DETONATOR_PROXY
+  proxy.localised_name = { "entity-name." .. CIRCUIT_DETONATOR_PROXY }
+  proxy.localised_description = { "entity-description." .. CIRCUIT_DETONATOR_PROXY }
+  proxy.hidden = true
+  proxy.selectable_in_game = false
+  proxy.flags = table.deepcopy(base_land_mine.flags or {})
+  add_flag(proxy.flags, "not-on-map")
+  add_flag(proxy.flags, "not-blueprintable")
+  add_flag(proxy.flags, "not-deconstructable")
+  add_flag(proxy.flags, "not-selectable-in-game")
+  add_flag(proxy.flags, "hide-alt-info")
+  add_flag(proxy.flags, "not-in-kill-statistics")
+
+  proxy.minable = nil
+  proxy.fast_replaceable_group = nil
+  proxy.corpse = nil
+  proxy.dying_explosion = nil
+  proxy.damaged_trigger_effect = nil
+  proxy.alert_when_damaged = false
+  proxy.collision_box = {{-0.01, -0.01}, {0.01, 0.01}}
+  proxy.selection_box = {{-0.01, -0.01}, {0.01, 0.01}}
+  proxy.collision_mask = { layers = {} }
+  proxy.trigger_radius = 0.01
+  proxy.timeout = 0
+  proxy.picture_safe = empty_sprite()
+  proxy.picture_set = empty_sprite()
+  proxy.picture_set_enemy = empty_sprite()
+
+  -- Keep the proxy mine's own detonation harmless. The action only kills the
+  -- proxy itself so runtime can observe on_entity_died and kill the linked
+  -- chest through the normal detonation path.
+  proxy.action = {
+    type = "direct",
+    action_delivery = {
+      type = "instant",
+      source_effects = {
+        {
+          type = "damage",
+          damage = { amount = 1000, type = "explosion" },
+        },
+      },
+    },
+  }
+
+  data:extend { proxy }
 end

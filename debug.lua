@@ -132,9 +132,6 @@ function Debug.on_gui_click(event)
   end
 end
 
--- Register events
-script.on_event(defines.events.on_gui_click, Debug.on_gui_click)
-
 -- Commands
 commands.add_command("detonation-debug", "Show debug logs window", function(command)
   local player = game.get_player(command.player_index)
