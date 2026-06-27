@@ -1761,6 +1761,18 @@ local function on_gui_click(event)
   Debug.on_gui_click(event)
 end
 
+local function on_gui_elem_changed(event)
+  if CircuitDetonator.on_gui_elem_changed(event) then return end
+end
+
+local function on_gui_selection_state_changed(event)
+  if CircuitDetonator.on_gui_selection_state_changed(event) then return end
+end
+
+local function on_gui_text_changed(event)
+  if CircuitDetonator.on_gui_text_changed(event) then return end
+end
+
 process_tick = function(event)
   process_staggered_emit_jobs(event)
   Launcher.process_jobs(event, execute_real_launcher_fallback)
@@ -1777,6 +1789,9 @@ local function register_events()
   script.on_event(defines.events.on_gui_opened, CircuitDetonator.on_gui_opened)
   script.on_event(defines.events.on_gui_closed, CircuitDetonator.on_gui_closed)
   script.on_event(defines.events.on_gui_click, on_gui_click)
+  script.on_event(defines.events.on_gui_elem_changed, on_gui_elem_changed)
+  script.on_event(defines.events.on_gui_selection_state_changed, on_gui_selection_state_changed)
+  script.on_event(defines.events.on_gui_text_changed, on_gui_text_changed)
   script.on_event(defines.events.on_built_entity, on_entity_built, {
     { filter = "type", type = "container" },
     { filter = "type", type = "logistic-container" },
@@ -1881,4 +1896,29 @@ end)
 commands.add_command("detonation_detonator_remove", "Remove the selected chest's circuit detonator proxy", function(event)
   local player = game.get_player(event.player_index)
   CircuitDetonator.remove_selected(player)
+end)
+
+commands.add_command("detonation_detonator_audit", "Check circuit detonator proxy mines on the map", function()
+  local report = CircuitDetonator.audit_proxy_mines()
+
+  game.print("=== Detonation Circuit Detonator Audit ===")
+  game.print("Proxy mines on map: " .. tostring(report.total))
+  game.print("Linked proxy mines: " .. tostring(report.linked))
+  game.print("Orphaned proxy mines: " .. tostring(report.orphaned))
+  game.print("Stale chest storage links: " .. tostring(report.stale_chest_links))
+  game.print("Stale proxy storage links: " .. tostring(report.stale_proxy_links))
+
+  if report.orphaned <= 0 then return end
+
+  game.print("First orphaned proxy mines:")
+  for i = 1, #report.orphaned_examples do
+    local example = report.orphaned_examples[i]
+    game.print(
+      tostring(i) .. ". "
+      .. "[gps=" .. math_floor(example.x) .. "," .. math_floor(example.y) .. "]"
+      .. " surface=" .. tostring(example.surface)
+      .. " proxy_unit=" .. tostring(example.unit_number)
+      .. " chest_unit=" .. tostring(example.chest_unit)
+    )
+  end
 end)

@@ -3,10 +3,16 @@ local CircuitDetonator = {}
 local PROXY_ENTITY = "detonation-circuit-detonator-proxy"
 
 local GUI_FRAME = "detonation_circuit_detonator_frame"
-local GUI_STATUS = "detonation_circuit_detonator_status"
-local GUI_ARM = "detonation_circuit_detonator_arm"
-local GUI_OPEN = "detonation_circuit_detonator_open"
+local GUI_CONDITION_SIGNAL = "detonation_circuit_detonator_condition_signal"
+local GUI_CONDITION_COMPARATOR = "detonation_circuit_detonator_condition_comparator"
+local GUI_CONDITION_SECOND_SIGNAL = "detonation_circuit_detonator_condition_second_signal"
+local GUI_CONDITION_CONSTANT = "detonation_circuit_detonator_condition_constant"
+local GUI_APPLY = "detonation_circuit_detonator_apply"
 local GUI_REMOVE = "detonation_circuit_detonator_remove"
+
+local COMPARATORS = { ">", "<", "=", "≥", "≤", "≠" }
+local DEFAULT_COMPARATOR = ">"
+local DEFAULT_CONSTANT = 0
 
 local WIRE_CONNECTORS = {
   defines.wire_connector_id.circuit_red,
@@ -21,6 +27,7 @@ local function ensure_storage()
   storage.circuit_detonator_pending_deaths = storage.circuit_detonator_pending_deaths or {}
   storage.circuit_detonator_pending_rebuilds = storage.circuit_detonator_pending_rebuilds or {}
   storage.circuit_detonator_pending_ghosts = storage.circuit_detonator_pending_ghosts or {}
+  storage.circuit_detonator_condition_drafts = storage.circuit_detonator_condition_drafts or {}
 end
 
 local function get_player(player_index)
@@ -49,6 +56,96 @@ local function copy_table(value)
     end
   end
   return result
+end
+
+local function normalize_comparator(comparator)
+  if comparator == ">=" then return "≥" end
+  if comparator == "<=" then return "≤" end
+  if comparator == "!=" then return "≠" end
+
+  for i = 1, #COMPARATORS do
+    if comparator == COMPARATORS[i] then return comparator end
+  end
+
+  return DEFAULT_COMPARATOR
+end
+
+local function comparator_index(comparator)
+  local normalized = normalize_comparator(comparator)
+  for i = 1, #COMPARATORS do
+    if COMPARATORS[i] == normalized then return i end
+  end
+  return 1
+end
+
+local function default_condition_draft()
+  return {
+    comparator = DEFAULT_COMPARATOR,
+    constant = DEFAULT_CONSTANT,
+  }
+end
+
+local function normalize_constant(value)
+  local number = tonumber(value)
+  if not number then return DEFAULT_CONSTANT end
+  return math.floor(number)
+end
+
+local function normalize_signal(signal)
+  if type(signal) ~= "table" or type(signal.name) ~= "string" or signal.name == "" then return nil end
+  return copy_table(signal)
+end
+
+local function normalize_condition_draft(draft)
+  if type(draft) ~= "table" then return default_condition_draft() end
+
+  return {
+    first_signal = normalize_signal(draft.first_signal),
+    comparator = normalize_comparator(draft.comparator),
+    second_signal = normalize_signal(draft.second_signal),
+    constant = normalize_constant(draft.constant),
+  }
+end
+
+local function condition_draft_from_config(config)
+  if not (config and config.circuit_condition) then return default_condition_draft() end
+
+  local condition = config.circuit_condition
+  return normalize_condition_draft {
+    first_signal = condition.first_signal,
+    comparator = condition.comparator,
+    second_signal = condition.second_signal,
+    constant = condition.constant,
+  }
+end
+
+local function config_from_condition_draft(draft)
+  local normalized = normalize_condition_draft(draft)
+  if not normalized.first_signal then return nil end
+
+  local condition = {
+    first_signal = copy_table(normalized.first_signal),
+    comparator = normalized.comparator,
+  }
+  if normalized.second_signal then
+    condition.second_signal = copy_table(normalized.second_signal)
+  else
+    condition.constant = normalized.constant
+  end
+
+  return {
+    circuit_condition = {
+      first_signal = condition.first_signal,
+      comparator = condition.comparator,
+      second_signal = condition.second_signal,
+      constant = condition.constant,
+    },
+    circuit_enable_disable = true,
+    input_networks = {
+      red = true,
+      green = true,
+    },
+  }
 end
 
 local function normalize_quality_name(entity_or_quality)
@@ -204,6 +301,59 @@ local function get_link_for_chest(chest)
   return get_link_by_chest_unit(chest.unit_number)
 end
 
+local function get_condition_draft_for_chest(chest)
+  if not (chest and chest.valid and chest.unit_number) then return default_condition_draft() end
+  ensure_storage()
+
+  local stored = storage.circuit_detonator_condition_drafts[chest.unit_number]
+  if stored then return normalize_condition_draft(stored) end
+
+  local link = get_link_for_chest(chest)
+  if link then
+    return condition_draft_from_config(capture_proxy_config(link.proxy))
+  end
+
+  return default_condition_draft()
+end
+
+local function set_condition_draft_for_chest(chest, draft)
+  if not (chest and chest.valid and chest.unit_number) then return end
+  ensure_storage()
+  storage.circuit_detonator_condition_drafts[chest.unit_number] = normalize_condition_draft(draft)
+end
+
+local function clear_condition_draft_for_chest_unit(chest_unit)
+  if not chest_unit then return end
+  ensure_storage()
+  storage.circuit_detonator_condition_drafts[chest_unit] = nil
+end
+
+local function add_styled_button(parent, spec, style_names)
+  if type(style_names) == "string" then style_names = { style_names } end
+  if type(style_names) == "table" then
+    for i = 1, #style_names do
+      local styled_spec = copy_table(spec)
+      styled_spec.style = style_names[i]
+      local ok, element = pcall(function()
+        return parent.add(styled_spec)
+      end)
+      if ok and element then return element end
+    end
+  end
+
+  return parent.add(spec)
+end
+
+local function player_has_supported_container_opened(player)
+  if not (player and player.valid) then return false end
+
+  local ok, supported = pcall(function()
+    return CircuitDetonator.is_supported_container(player.opened)
+  end)
+
+  return ok and supported == true
+end
+
 local function connect_proxy_to_chest(chest, proxy)
   if not (chest and chest.valid and proxy and proxy.valid) then return end
 
@@ -307,7 +457,9 @@ function CircuitDetonator.cleanup_entity(entity)
   end
 
   if CircuitDetonator.is_supported_container(entity) then
+    local chest_unit = entity.unit_number
     remove_link(entity.unit_number, true)
+    clear_condition_draft_for_chest_unit(chest_unit)
   end
 end
 
@@ -363,7 +515,9 @@ function CircuitDetonator.prepare_container_death(entity, tick)
     remember_pending_death(entity, config, tick)
   end
 
+  local chest_unit = entity.unit_number
   remove_link(entity.unit_number, true)
+  clear_condition_draft_for_chest_unit(chest_unit)
 end
 
 local function take_pending_death(event, surface_index)
@@ -454,22 +608,11 @@ function CircuitDetonator.destroy_gui(player)
   destroy_gui(player)
 end
 
-local function update_gui_status(frame, chest)
-  if not (frame and frame.valid) then return end
-  local status = frame[GUI_STATUS]
-  if not status then return end
-
-  if get_link_for_chest(chest) then
-    status.caption = { "detonation-gui.circuit-detonator-armed" }
-  else
-    status.caption = { "detonation-gui.circuit-detonator-not-armed" }
-  end
-end
-
 function CircuitDetonator.build_gui(player, chest)
   if not (player and player.valid and CircuitDetonator.is_supported_container(chest)) then return end
   ensure_storage()
   destroy_gui(player)
+  local draft = get_condition_draft_for_chest(chest)
 
   local frame = player.gui.relative.add {
     type = "frame",
@@ -481,39 +624,118 @@ function CircuitDetonator.build_gui(player, chest)
       position = defines.relative_gui_position.right,
     },
   }
+  pcall(function()
+    frame.style.width = 300
+  end)
 
   frame.add {
     type = "label",
-    name = GUI_STATUS,
-    caption = "",
+    caption = { "detonation-gui.circuit-detonator-condition" },
   }
 
-  local flow = frame.add {
+  local condition_table = frame.add {
+    type = "table",
+    column_count = 4,
+  }
+  pcall(function()
+    condition_table.style.horizontal_spacing = 8
+    condition_table.style.vertical_spacing = 4
+  end)
+
+  local signal = condition_table.add {
+    type = "choose-elem-button",
+    name = GUI_CONDITION_SIGNAL,
+    elem_type = "signal",
+    tags = { chest_unit = chest.unit_number },
+  }
+  pcall(function()
+    signal.style.size = 40
+  end)
+  if draft.first_signal then
+    pcall(function()
+      signal.elem_value = copy_table(draft.first_signal)
+    end)
+  end
+
+  local comparator = condition_table.add {
+    type = "drop-down",
+    name = GUI_CONDITION_COMPARATOR,
+    items = COMPARATORS,
+    selected_index = comparator_index(draft.comparator),
+    tags = { chest_unit = chest.unit_number },
+  }
+  pcall(function()
+    comparator.style.width = 56
+    comparator.style.height = 40
+  end)
+
+  local second_signal = condition_table.add {
+    type = "choose-elem-button",
+    name = GUI_CONDITION_SECOND_SIGNAL,
+    elem_type = "signal",
+    tooltip = { "detonation-gui.circuit-detonator-second-signal-tooltip" },
+    tags = { chest_unit = chest.unit_number },
+  }
+  pcall(function()
+    second_signal.style.size = 40
+  end)
+  if draft.second_signal then
+    pcall(function()
+      second_signal.elem_value = copy_table(draft.second_signal)
+    end)
+  end
+
+  local constant = condition_table.add {
+    type = "textfield",
+    name = GUI_CONDITION_CONSTANT,
+    text = tostring(normalize_constant(draft.constant)),
+    numeric = true,
+    allow_decimal = false,
+    allow_negative = true,
+    tags = { chest_unit = chest.unit_number },
+  }
+  pcall(function()
+    constant.style.width = 56
+    constant.style.height = 40
+  end)
+  if draft.second_signal then
+    pcall(function()
+      constant.enabled = false
+    end)
+  end
+
+  local buttons = frame.add {
     type = "flow",
-    direction = "horizontal",
+    direction = "vertical",
   }
+  pcall(function()
+    buttons.style.top_margin = 8
+    buttons.style.vertical_spacing = 4
+  end)
 
-  flow.add {
+  local apply = add_styled_button(buttons, {
     type = "button",
-    name = GUI_ARM,
-    caption = { "detonation-gui.circuit-detonator-create" },
+    name = GUI_APPLY,
+    caption = { "detonation-gui.circuit-detonator-apply-short" },
+    tooltip = { "detonation-gui.circuit-detonator-apply" },
     tags = { chest_unit = chest.unit_number },
-  }
-  flow.add {
-    type = "button",
-    name = GUI_OPEN,
-    caption = { "detonation-gui.circuit-detonator-open" },
-    tags = { chest_unit = chest.unit_number },
-  }
-  flow.add {
+  }, { "green_button" })
+  pcall(function()
+    apply.style.width = 176
+  end)
+
+  local remove = add_styled_button(buttons, {
     type = "button",
     name = GUI_REMOVE,
-    caption = { "detonation-gui.circuit-detonator-remove" },
+    caption = { "detonation-gui.circuit-detonator-remove-short" },
+    tooltip = { "detonation-gui.circuit-detonator-remove-detonator" },
     tags = { chest_unit = chest.unit_number },
-  }
+  }, { "red_button" })
+  pcall(function()
+    remove.style.width = 176
+  end)
 
   storage.circuit_detonator_gui_chest[player.index] = chest.unit_number
-  update_gui_status(frame, chest)
 end
 
 local function find_chest_by_unit(unit_number)
@@ -557,17 +779,24 @@ end
 function CircuitDetonator.on_gui_opened(event)
   local player = get_player(event.player_index)
   if not player then return end
-  destroy_gui(player)
 
   local entity = event.entity
   if CircuitDetonator.is_supported_container(entity) then
+    destroy_gui(player)
     CircuitDetonator.build_gui(player, entity)
+    return
   end
+
+  if player_has_supported_container_opened(player) then return end
+  destroy_gui(player)
 end
 
 function CircuitDetonator.on_gui_closed(event)
   local player = get_player(event.player_index)
   if not player then return end
+
+  if player_has_supported_container_opened(player) then return end
+
   destroy_gui(player)
   if storage.circuit_detonator_gui_chest then
     storage.circuit_detonator_gui_chest[player.index] = nil
@@ -578,7 +807,7 @@ function CircuitDetonator.on_gui_click(event)
   local element = event.element
   if not (element and element.valid) then return false end
   local name = element.name
-  if name ~= GUI_ARM and name ~= GUI_OPEN and name ~= GUI_REMOVE then return false end
+  if name ~= GUI_APPLY and name ~= GUI_REMOVE then return false end
 
   local player = get_player(event.player_index)
   if not player then return true end
@@ -595,20 +824,71 @@ function CircuitDetonator.on_gui_click(event)
     return true
   end
 
-  local proxy = CircuitDetonator.ensure_for_chest(chest)
+  local config = config_from_condition_draft(get_condition_draft_for_chest(chest))
+  if not config then
+    player.print({ "detonation-message.circuit-detonator-condition-missing-signal" })
+    return true
+  end
+
+  local proxy = CircuitDetonator.ensure_for_chest(chest, config)
   if not (proxy and proxy.valid) then
     player.print({ "detonation-message.circuit-detonator-create-failed" })
     return true
   end
 
-  if name == GUI_OPEN then
-    destroy_gui(player)
-    player.opened = proxy
-  else
-    CircuitDetonator.build_gui(player, chest)
-  end
+  player.print({ "detonation-message.circuit-detonator-condition-applied" })
+  CircuitDetonator.build_gui(player, chest)
 
   return true
+end
+
+local function update_condition_draft_from_gui_event(event)
+  local element = event.element
+  if not (element and element.valid) then return false end
+  local name = element.name
+  if name ~= GUI_CONDITION_SIGNAL
+      and name ~= GUI_CONDITION_COMPARATOR
+      and name ~= GUI_CONDITION_SECOND_SIGNAL
+      and name ~= GUI_CONDITION_CONSTANT then
+    return false
+  end
+
+  local chest = chest_from_gui_event(event)
+  if not chest then return true end
+
+  local draft = get_condition_draft_for_chest(chest)
+  if name == GUI_CONDITION_SIGNAL then
+    draft.first_signal = normalize_signal(element.elem_value)
+  elseif name == GUI_CONDITION_COMPARATOR then
+    draft.comparator = COMPARATORS[element.selected_index] or DEFAULT_COMPARATOR
+  elseif name == GUI_CONDITION_SECOND_SIGNAL then
+    draft.second_signal = normalize_signal(element.elem_value)
+    if element.parent and element.parent.valid then
+      local constant = element.parent[GUI_CONDITION_CONSTANT]
+      if constant and constant.valid then
+        pcall(function()
+          constant.enabled = draft.second_signal == nil
+        end)
+      end
+    end
+  elseif name == GUI_CONDITION_CONSTANT then
+    draft.constant = normalize_constant(element.text)
+  end
+
+  set_condition_draft_for_chest(chest, draft)
+  return true
+end
+
+function CircuitDetonator.on_gui_elem_changed(event)
+  return update_condition_draft_from_gui_event(event)
+end
+
+function CircuitDetonator.on_gui_selection_state_changed(event)
+  return update_condition_draft_from_gui_event(event)
+end
+
+function CircuitDetonator.on_gui_text_changed(event)
+  return update_condition_draft_from_gui_event(event)
 end
 
 function CircuitDetonator.arm_selected(player)
@@ -647,6 +927,86 @@ function CircuitDetonator.remove_selected(player)
 
   CircuitDetonator.remove_for_chest(player.selected)
   player.print({ "detonation-message.circuit-detonator-removed" })
+end
+
+function CircuitDetonator.audit_proxy_mines()
+  ensure_storage()
+
+  local report = {
+    total = 0,
+    linked = 0,
+    orphaned = 0,
+    stale_chest_links = 0,
+    stale_proxy_links = 0,
+    orphaned_examples = {},
+  }
+  local seen_proxy_units = {}
+
+  for _, surface in pairs(game.surfaces) do
+    local proxies = surface.find_entities_filtered { name = PROXY_ENTITY }
+    for i = 1, #proxies do
+      local proxy = proxies[i]
+      report.total = report.total + 1
+
+      local proxy_unit = proxy.unit_number
+      if proxy_unit then
+        seen_proxy_units[proxy_unit] = true
+      end
+
+      local chest_unit = proxy_unit and storage.circuit_detonators_by_proxy[proxy_unit]
+      local link = chest_unit and storage.circuit_detonators_by_chest[chest_unit]
+      local linked = link
+          and link.chest
+          and link.chest.valid
+          and link.proxy
+          and link.proxy.valid
+          and link.proxy.unit_number == proxy_unit
+          and link.proxy_unit == proxy_unit
+          and link.chest_unit == chest_unit
+
+      if linked then
+        report.linked = report.linked + 1
+      else
+        report.orphaned = report.orphaned + 1
+        if #report.orphaned_examples < 10 then
+          report.orphaned_examples[#report.orphaned_examples + 1] = {
+            surface = surface.name,
+            x = proxy.position.x,
+            y = proxy.position.y,
+            unit_number = proxy_unit,
+            chest_unit = chest_unit,
+          }
+        end
+      end
+    end
+  end
+
+  for chest_unit, link in pairs(storage.circuit_detonators_by_chest) do
+    if not (link
+        and link.chest
+        and link.chest.valid
+        and link.proxy
+        and link.proxy.valid
+        and link.proxy_unit
+        and seen_proxy_units[link.proxy_unit]) then
+      report.stale_chest_links = report.stale_chest_links + 1
+    end
+  end
+
+  for proxy_unit, chest_unit in pairs(storage.circuit_detonators_by_proxy) do
+    local link = storage.circuit_detonators_by_chest[chest_unit]
+    if not (seen_proxy_units[proxy_unit]
+        and link
+        and link.chest
+        and link.chest.valid
+        and link.proxy
+        and link.proxy.valid
+        and link.proxy.unit_number == proxy_unit) then
+      report.stale_proxy_links = report.stale_proxy_links + 1
+    end
+  end
+
+  return report
 end
 
 function CircuitDetonator.initialize_storage()
