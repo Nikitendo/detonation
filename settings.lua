@@ -49,4 +49,11 @@ data:extend({
     maximum_value = 3600,
     order = "f"
   },
+  {
+    type = "bool-setting",
+    name = "detonation-controlled-chest-detonation",
+    setting_type = "startup",
+    default_value = true,
+    order = "g"
+  },
 })

@@ -3,6 +3,9 @@ local CIRCUIT_DETONATOR_PROXY = "detonation-circuit-detonator-proxy"
 local CIRCUIT_DETONATION_TECH = "detonation-circuit-detonation"
 local CIRCUIT_DETONATION_SPRITE = "detonation-circuit-detonation-icon"
 local INVISIBLE_CHARACTER_SHEET = "__detonation__/graphics/invisible-character.png"
+local controlled_chest_detonation_enabled =
+    not settings.startup["detonation-controlled-chest-detonation"]
+    or settings.startup["detonation-controlled-chest-detonation"].value ~= false
 
 local function add_flag(flags, flag)
   for _, existing in pairs(flags) do
@@ -73,7 +76,7 @@ if base_character then
 end
 
 local base_land_mine = data.raw["land-mine"] and data.raw["land-mine"]["land-mine"]
-if base_land_mine then
+if controlled_chest_detonation_enabled and base_land_mine then
   local proxy = table.deepcopy(base_land_mine)
   proxy.name = CIRCUIT_DETONATOR_PROXY
   proxy.localised_name = { "entity-name." .. CIRCUIT_DETONATOR_PROXY }
@@ -122,20 +125,22 @@ if base_land_mine then
   data:extend { proxy }
 end
 
-data:extend {
-  {
-    type = "sprite",
-    name = CIRCUIT_DETONATION_SPRITE,
-    filename = "__detonation__/graphics/icons/circuit-detonation.png",
-    width = 64,
-    height = 64,
-  },
-}
+if controlled_chest_detonation_enabled then
+  data:extend {
+    {
+      type = "sprite",
+      name = CIRCUIT_DETONATION_SPRITE,
+      filename = "__detonation__/graphics/icons/circuit-detonation.png",
+      width = 64,
+      height = 64,
+    },
+  }
+end
 
 local military_technology = data.raw.technology and data.raw.technology.military
 local automation_technology = data.raw.technology and data.raw.technology.automation
 
-if data.raw.technology and not data.raw.technology[CIRCUIT_DETONATION_TECH] then
+if controlled_chest_detonation_enabled and data.raw.technology and not data.raw.technology[CIRCUIT_DETONATION_TECH] then
   data:extend {
     {
       type = "technology",

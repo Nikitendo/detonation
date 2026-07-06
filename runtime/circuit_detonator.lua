@@ -5,6 +5,7 @@ local BLUEPRINT_TAG = "detonation-circuit-detonator"
 local BLUEPRINT_TAG_VERSION = 1
 local CIRCUIT_DETONATION_TECH = "detonation-circuit-detonation"
 local CIRCUIT_DETONATION_SPRITE = "detonation-circuit-detonation-icon"
+local CONTROLLED_CHEST_DETONATION_SETTING = "detonation-controlled-chest-detonation"
 
 local GUI_FRAME = "detonation_circuit_detonator_frame"
 local GUI_EXPAND = "detonation_circuit_detonator_expand"
@@ -40,6 +41,15 @@ end
 local function get_player(player_index)
   if not player_index then return nil end
   return game.get_player(player_index)
+end
+
+local function controlled_chest_detonation_enabled()
+  local setting = settings.startup[CONTROLLED_CHEST_DETONATION_SETTING]
+  return not setting or setting.value ~= false
+end
+
+function CircuitDetonator.is_enabled()
+  return controlled_chest_detonation_enabled()
 end
 
 local function get_chest_inventory(entity)
@@ -301,7 +311,7 @@ function CircuitDetonator.is_supported_container(entity)
 end
 
 function CircuitDetonator.is_proxy(entity)
-  return entity and entity.valid and entity.name == PROXY_ENTITY
+  return controlled_chest_detonation_enabled() and entity and entity.valid and entity.name == PROXY_ENTITY
 end
 
 local function get_link_by_chest_unit(chest_unit)
@@ -387,6 +397,7 @@ local function player_has_supported_container_opened(player)
 end
 
 local function force_has_circuit_detonation(force)
+  if not controlled_chest_detonation_enabled() then return false end
   if not (force and force.valid) then return false end
 
   local technologies = force.technologies
@@ -441,6 +452,7 @@ local function create_proxy(chest)
 end
 
 function CircuitDetonator.ensure_for_chest(chest, config)
+  if not controlled_chest_detonation_enabled() then return nil end
   if not CircuitDetonator.is_supported_container(chest) then return nil end
   ensure_storage()
 
@@ -508,6 +520,7 @@ function CircuitDetonator.cleanup_entity(entity)
 end
 
 function CircuitDetonator.take_chest_for_dead_proxy(proxy)
+  if not controlled_chest_detonation_enabled() then return nil end
   if not CircuitDetonator.is_proxy(proxy) then return nil end
   ensure_storage()
 
@@ -544,6 +557,7 @@ local function remember_pending_death(entity, config, tick)
 end
 
 function CircuitDetonator.prepare_container_death(entity, tick)
+  if not controlled_chest_detonation_enabled() then return end
   if not CircuitDetonator.is_supported_container(entity) then return end
   ensure_storage()
 
@@ -602,6 +616,7 @@ local function remove_pending_rebuild_key(key)
 end
 
 function CircuitDetonator.on_post_entity_died(event)
+  if not controlled_chest_detonation_enabled() then return end
   local ghost = event.ghost
   local surface_index = ghost and ghost.valid and ghost.surface.index or nil
   local config = take_pending_death(event, surface_index)
@@ -621,6 +636,7 @@ function CircuitDetonator.on_post_entity_died(event)
 end
 
 local function apply_blueprint_config_to_chest(entity, tags)
+  if not controlled_chest_detonation_enabled() then return false end
   if not CircuitDetonator.is_supported_container(entity) then return false end
 
   local config = config_from_blueprint_tags(tags)
@@ -632,6 +648,7 @@ local function apply_blueprint_config_to_chest(entity, tags)
 end
 
 function CircuitDetonator.restore_for_built_entity(entity, tags)
+  if not controlled_chest_detonation_enabled() then return end
   if not CircuitDetonator.is_supported_container(entity) then return end
   ensure_storage()
 
@@ -646,6 +663,7 @@ function CircuitDetonator.restore_for_built_entity(entity, tags)
 end
 
 function CircuitDetonator.on_player_setup_blueprint(event)
+  if not controlled_chest_detonation_enabled() then return end
   local blueprint = event.stack or event.record
   if not blueprint then return end
 
@@ -676,6 +694,7 @@ function CircuitDetonator.on_player_setup_blueprint(event)
 end
 
 function CircuitDetonator.on_entity_settings_pasted(event)
+  if not controlled_chest_detonation_enabled() then return end
   local source = event.source
   local destination = event.destination
   if not CircuitDetonator.is_supported_container(source) then return end
@@ -699,6 +718,7 @@ function CircuitDetonator.on_entity_settings_pasted(event)
 end
 
 function CircuitDetonator.on_blueprint_settings_pasted(event)
+  if not controlled_chest_detonation_enabled() then return end
   local entity = event.entity
   if not (entity and entity.valid) then return end
 
@@ -713,6 +733,7 @@ function CircuitDetonator.on_blueprint_settings_pasted(event)
 end
 
 function CircuitDetonator.on_pre_ghost_deconstructed(event)
+  if not controlled_chest_detonation_enabled() then return end
   local ghost = event.ghost
   if not (ghost and ghost.valid and ghost.unit_number) then return end
   ensure_storage()
@@ -737,6 +758,10 @@ end
 
 function CircuitDetonator.build_gui(player, chest, expanded)
   if not (player and player.valid and CircuitDetonator.is_supported_container(chest)) then return end
+  if not controlled_chest_detonation_enabled() then
+    destroy_gui(player)
+    return
+  end
   if not player_has_circuit_detonation_unlocked(player) then
     destroy_gui(player)
     return
@@ -971,6 +996,10 @@ end
 function CircuitDetonator.on_gui_opened(event)
   local player = get_player(event.player_index)
   if not player then return end
+  if not controlled_chest_detonation_enabled() then
+    destroy_gui(player)
+    return
+  end
 
   local entity = event.entity
   if CircuitDetonator.is_supported_container(entity) then
@@ -1004,6 +1033,7 @@ function CircuitDetonator.on_gui_click(event)
   if not (element and element.valid) then return false end
   local name = element.name
   if name ~= GUI_EXPAND and name ~= GUI_COLLAPSE and name ~= GUI_APPLY and name ~= GUI_REMOVE then return false end
+  if not controlled_chest_detonation_enabled() then return true end
 
   local player = get_player(event.player_index)
   if not player then return true end
@@ -1053,6 +1083,7 @@ function CircuitDetonator.on_gui_click(event)
 end
 
 local function update_condition_draft_from_gui_event(event)
+  if not controlled_chest_detonation_enabled() then return false end
   local element = event.element
   if not (element and element.valid) then return false end
   local name = element.name
@@ -1102,6 +1133,10 @@ function CircuitDetonator.on_gui_text_changed(event)
 end
 
 function CircuitDetonator.arm_selected(player)
+  if not controlled_chest_detonation_enabled() then
+    if player then player.print({ "detonation-message.circuit-detonator-disabled" }) end
+    return
+  end
   if not (player and player.valid and CircuitDetonator.is_supported_container(player.selected)) then
     if player then player.print({ "detonation-message.circuit-detonator-select-chest" }) end
     return
@@ -1116,6 +1151,10 @@ function CircuitDetonator.arm_selected(player)
 end
 
 function CircuitDetonator.open_selected(player)
+  if not controlled_chest_detonation_enabled() then
+    if player then player.print({ "detonation-message.circuit-detonator-disabled" }) end
+    return
+  end
   if not (player and player.valid and CircuitDetonator.is_supported_container(player.selected)) then
     if player then player.print({ "detonation-message.circuit-detonator-select-chest" }) end
     return
@@ -1130,6 +1169,10 @@ function CircuitDetonator.open_selected(player)
 end
 
 function CircuitDetonator.remove_selected(player)
+  if not controlled_chest_detonation_enabled() then
+    if player then player.print({ "detonation-message.circuit-detonator-disabled" }) end
+    return
+  end
   if not (player and player.valid and CircuitDetonator.is_supported_container(player.selected)) then
     if player then player.print({ "detonation-message.circuit-detonator-select-chest" }) end
     return
@@ -1150,6 +1193,7 @@ function CircuitDetonator.audit_proxy_mines()
     stale_proxy_links = 0,
     orphaned_examples = {},
   }
+  if not controlled_chest_detonation_enabled() then return report end
   local seen_proxy_units = {}
 
   for _, surface in pairs(game.surfaces) do
@@ -1221,6 +1265,39 @@ end
 
 function CircuitDetonator.initialize_storage()
   ensure_storage()
+  if controlled_chest_detonation_enabled() then return end
+
+  if game and game.surfaces then
+    for _, surface in pairs(game.surfaces) do
+      local ok, proxies = pcall(function()
+        return surface.find_entities_filtered { name = PROXY_ENTITY }
+      end)
+      if ok and proxies then
+        for i = 1, #proxies do
+          local proxy = proxies[i]
+          if proxy and proxy.valid then
+            pcall(function()
+              proxy.destroy()
+            end)
+          end
+        end
+      end
+    end
+  end
+
+  if game and game.players then
+    for _, player in pairs(game.players) do
+      destroy_gui(player)
+    end
+  end
+
+  storage.circuit_detonators_by_chest = {}
+  storage.circuit_detonators_by_proxy = {}
+  storage.circuit_detonator_forced_death_configs = {}
+  storage.circuit_detonator_pending_deaths = {}
+  storage.circuit_detonator_pending_rebuilds = {}
+  storage.circuit_detonator_pending_ghosts = {}
+  storage.circuit_detonator_condition_drafts = {}
 end
 
 return CircuitDetonator
