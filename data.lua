@@ -1,5 +1,7 @@
 local REAL_LAUNCHER_HOST_CHARACTER = "detonation-invisible-character"
 local CIRCUIT_DETONATOR_PROXY = "detonation-circuit-detonator-proxy"
+local CIRCUIT_DETONATION_TECH = "detonation-circuit-detonation"
+local CIRCUIT_DETONATION_SPRITE = "detonation-circuit-detonation-icon"
 local INVISIBLE_CHARACTER_SHEET = "__detonation__/graphics/invisible-character.png"
 
 local function add_flag(flags, flag)
@@ -118,4 +120,42 @@ if base_land_mine then
   }
 
   data:extend { proxy }
+end
+
+data:extend {
+  {
+    type = "sprite",
+    name = CIRCUIT_DETONATION_SPRITE,
+    filename = "__detonation__/graphics/icons/circuit-detonation.png",
+    width = 64,
+    height = 64,
+  },
+}
+
+local military_technology = data.raw.technology and data.raw.technology.military
+local automation_technology = data.raw.technology and data.raw.technology.automation
+
+if data.raw.technology and not data.raw.technology[CIRCUIT_DETONATION_TECH] then
+  data:extend {
+    {
+      type = "technology",
+      name = CIRCUIT_DETONATION_TECH,
+      icon = "__detonation__/graphics/technology/circuit-detonation.png",
+      icon_size = 256,
+      prerequisites = military_technology and { "military" } or nil,
+      effects = {},
+      unit = table.deepcopy(
+        (military_technology and military_technology.unit)
+        or (automation_technology and automation_technology.unit)
+        or {
+          count = 10,
+          ingredients = {
+            { "automation-science-pack", 1 },
+          },
+          time = 10,
+        }
+      ),
+      order = "e-a-a",
+    },
+  }
 end

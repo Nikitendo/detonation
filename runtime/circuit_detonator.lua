@@ -3,8 +3,12 @@ local CircuitDetonator = {}
 local PROXY_ENTITY = "detonation-circuit-detonator-proxy"
 local BLUEPRINT_TAG = "detonation-circuit-detonator"
 local BLUEPRINT_TAG_VERSION = 1
+local CIRCUIT_DETONATION_TECH = "detonation-circuit-detonation"
+local CIRCUIT_DETONATION_SPRITE = "detonation-circuit-detonation-icon"
 
 local GUI_FRAME = "detonation_circuit_detonator_frame"
+local GUI_EXPAND = "detonation_circuit_detonator_expand"
+local GUI_COLLAPSE = "detonation_circuit_detonator_collapse"
 local GUI_CONDITION_SIGNAL = "detonation_circuit_detonator_condition_signal"
 local GUI_CONDITION_COMPARATOR = "detonation_circuit_detonator_condition_comparator"
 local GUI_CONDITION_SECOND_SIGNAL = "detonation_circuit_detonator_condition_second_signal"
@@ -25,6 +29,7 @@ local function ensure_storage()
   storage.circuit_detonators_by_chest = storage.circuit_detonators_by_chest or {}
   storage.circuit_detonators_by_proxy = storage.circuit_detonators_by_proxy or {}
   storage.circuit_detonator_gui_chest = storage.circuit_detonator_gui_chest or {}
+  storage.circuit_detonator_gui_expanded = storage.circuit_detonator_gui_expanded or {}
   storage.circuit_detonator_forced_death_configs = storage.circuit_detonator_forced_death_configs or {}
   storage.circuit_detonator_pending_deaths = storage.circuit_detonator_pending_deaths or {}
   storage.circuit_detonator_pending_rebuilds = storage.circuit_detonator_pending_rebuilds or {}
@@ -381,6 +386,18 @@ local function player_has_supported_container_opened(player)
   return ok and supported == true
 end
 
+local function force_has_circuit_detonation(force)
+  if not (force and force.valid) then return false end
+
+  local technologies = force.technologies
+  local technology = technologies and technologies[CIRCUIT_DETONATION_TECH]
+  return technology and technology.researched == true
+end
+
+local function player_has_circuit_detonation_unlocked(player)
+  return player and player.valid and force_has_circuit_detonation(player.force)
+end
+
 local function connect_proxy_to_chest(chest, proxy)
   if not (chest and chest.valid and proxy and proxy.valid) then return end
 
@@ -676,7 +693,7 @@ function CircuitDetonator.on_entity_settings_pasted(event)
 
   for _, player in pairs(game.players) do
     if player.valid and storage.circuit_detonator_gui_chest[player.index] == destination.unit_number then
-      CircuitDetonator.build_gui(player, destination)
+      CircuitDetonator.build_gui(player, destination, storage.circuit_detonator_gui_expanded[player.index] == true)
     end
   end
 end
@@ -709,30 +726,97 @@ local function destroy_gui(player)
   if player.gui.relative[GUI_FRAME] then
     player.gui.relative[GUI_FRAME].destroy()
   end
+  if player.gui.relative[GUI_EXPAND] then
+    player.gui.relative[GUI_EXPAND].destroy()
+  end
 end
 
 function CircuitDetonator.destroy_gui(player)
   destroy_gui(player)
 end
 
-function CircuitDetonator.build_gui(player, chest)
+function CircuitDetonator.build_gui(player, chest, expanded)
   if not (player and player.valid and CircuitDetonator.is_supported_container(chest)) then return end
+  if not player_has_circuit_detonation_unlocked(player) then
+    destroy_gui(player)
+    return
+  end
   ensure_storage()
   destroy_gui(player)
-  local draft = get_condition_draft_for_chest(chest)
 
+  if not expanded then
+    local expand = player.gui.relative.add {
+      type = "sprite-button",
+      name = GUI_EXPAND,
+      sprite = CIRCUIT_DETONATION_SPRITE,
+      tooltip = { "detonation-gui.circuit-detonator-open-tooltip" },
+      tags = { chest_unit = chest.unit_number },
+      anchor = {
+        gui = defines.relative_gui_type.container_gui,
+        position = defines.relative_gui_position.right,
+      },
+    }
+    pcall(function()
+      expand.style.size = 40
+    end)
+
+    storage.circuit_detonator_gui_chest[player.index] = chest.unit_number
+    storage.circuit_detonator_gui_expanded[player.index] = false
+    return
+  end
+
+  local draft = get_condition_draft_for_chest(chest)
   local frame = player.gui.relative.add {
     type = "frame",
     name = GUI_FRAME,
     direction = "vertical",
-    caption = { "detonation-gui.circuit-detonator-title" },
     anchor = {
       gui = defines.relative_gui_type.container_gui,
       position = defines.relative_gui_position.right,
     },
   }
   pcall(function()
-    frame.style.width = 300
+    frame.style.minimal_width = 0
+    frame.style.maximal_width = 260
+  end)
+
+  local titlebar = frame.add {
+    type = "flow",
+    direction = "horizontal",
+  }
+  pcall(function()
+    titlebar.style.horizontal_spacing = 8
+    titlebar.style.bottom_margin = 4
+    titlebar.style.horizontally_stretchable = true
+  end)
+
+  local title = titlebar.add {
+    type = "label",
+    caption = { "detonation-gui.circuit-detonator-title" },
+    style = "frame_title",
+  }
+  pcall(function()
+    title.style.right_margin = 8
+  end)
+
+  local title_spacer = titlebar.add {
+    type = "empty-widget",
+  }
+  pcall(function()
+    title_spacer.style.horizontally_stretchable = true
+    title_spacer.style.height = 24
+  end)
+
+  local collapse = titlebar.add {
+    type = "sprite-button",
+    name = GUI_COLLAPSE,
+    sprite = "utility/close",
+    tooltip = { "detonation-gui.circuit-detonator-close-tooltip" },
+    tags = { chest_unit = chest.unit_number },
+  }
+  pcall(function()
+    collapse.style.size = 24
+    collapse.style.horizontal_align = "right"
   end)
 
   frame.add {
@@ -828,7 +912,7 @@ function CircuitDetonator.build_gui(player, chest)
     tags = { chest_unit = chest.unit_number },
   }, { "green_button" })
   pcall(function()
-    apply.style.width = 176
+    apply.style.horizontally_stretchable = true
   end)
 
   local remove = add_styled_button(buttons, {
@@ -839,10 +923,11 @@ function CircuitDetonator.build_gui(player, chest)
     tags = { chest_unit = chest.unit_number },
   }, { "red_button" })
   pcall(function()
-    remove.style.width = 176
+    remove.style.horizontally_stretchable = true
   end)
 
   storage.circuit_detonator_gui_chest[player.index] = chest.unit_number
+  storage.circuit_detonator_gui_expanded[player.index] = true
 end
 
 local function find_chest_by_unit(unit_number)
@@ -890,7 +975,11 @@ function CircuitDetonator.on_gui_opened(event)
   local entity = event.entity
   if CircuitDetonator.is_supported_container(entity) then
     destroy_gui(player)
-    CircuitDetonator.build_gui(player, entity)
+    ensure_storage()
+    if storage.circuit_detonator_gui_expanded[player.index] == nil then
+      storage.circuit_detonator_gui_expanded[player.index] = true
+    end
+    CircuitDetonator.build_gui(player, entity, storage.circuit_detonator_gui_expanded[player.index] == true)
     return
   end
 
@@ -914,7 +1003,7 @@ function CircuitDetonator.on_gui_click(event)
   local element = event.element
   if not (element and element.valid) then return false end
   local name = element.name
-  if name ~= GUI_APPLY and name ~= GUI_REMOVE then return false end
+  if name ~= GUI_EXPAND and name ~= GUI_COLLAPSE and name ~= GUI_APPLY and name ~= GUI_REMOVE then return false end
 
   local player = get_player(event.player_index)
   if not player then return true end
@@ -925,9 +1014,23 @@ function CircuitDetonator.on_gui_click(event)
     return true
   end
 
+  if name == GUI_EXPAND then
+    ensure_storage()
+    storage.circuit_detonator_gui_expanded[player.index] = true
+    CircuitDetonator.build_gui(player, chest, true)
+    return true
+  end
+
+  if name == GUI_COLLAPSE then
+    ensure_storage()
+    storage.circuit_detonator_gui_expanded[player.index] = false
+    CircuitDetonator.build_gui(player, chest, false)
+    return true
+  end
+
   if name == GUI_REMOVE then
     CircuitDetonator.remove_for_chest(chest)
-    CircuitDetonator.build_gui(player, chest)
+    CircuitDetonator.build_gui(player, chest, true)
     return true
   end
 
@@ -944,7 +1047,7 @@ function CircuitDetonator.on_gui_click(event)
   end
 
   player.print({ "detonation-message.circuit-detonator-condition-applied" })
-  CircuitDetonator.build_gui(player, chest)
+  CircuitDetonator.build_gui(player, chest, true)
 
   return true
 end
