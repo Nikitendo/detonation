@@ -4,7 +4,7 @@
   "description": "Storage is no longer safe.\n\nIf an entity containing explosives is destroyed, its contents detonate immediately.\n\nThis mod makes you be more careful with explosives... or look at them in a new way!",
   "homepage": "https://github.com/nikitendo/detonation",
   "author": "Nikitendo",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "factorio_version": "2.1",
   "dependencies": [
     "base >= 2.1.0"
