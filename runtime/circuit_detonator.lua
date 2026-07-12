@@ -14,6 +14,8 @@ local GUI_CONDITION_SIGNAL = "detonation_circuit_detonator_condition_signal"
 local GUI_CONDITION_COMPARATOR = "detonation_circuit_detonator_condition_comparator"
 local GUI_CONDITION_SECOND_SIGNAL = "detonation_circuit_detonator_condition_second_signal"
 local GUI_CONDITION_CONSTANT = "detonation_circuit_detonator_condition_constant"
+local GUI_INPUT_RED = "detonation_circuit_detonator_input_red"
+local GUI_INPUT_GREEN = "detonation_circuit_detonator_input_green"
 local GUI_MIN_DISTANCE = "detonation_circuit_detonator_min_distance"
 local GUI_DIRECTION_PREFIX = "detonation_circuit_detonator_direction_"
 local GUI_APPLY = "detonation_circuit_detonator_apply"
@@ -53,6 +55,7 @@ local function ensure_storage()
   storage.circuit_detonator_pending_ghosts = storage.circuit_detonator_pending_ghosts or {}
   storage.circuit_detonator_condition_drafts = storage.circuit_detonator_condition_drafts or {}
   storage.circuit_detonator_pending_rearms = storage.circuit_detonator_pending_rearms or {}
+  storage.circuit_detonator_input_network_version = storage.circuit_detonator_input_network_version or 0
 end
 
 local function get_player(player_index)
@@ -117,6 +120,8 @@ local function default_condition_draft()
     comparator = DEFAULT_COMPARATOR,
     constant = DEFAULT_CONSTANT,
     min_distance = DEFAULT_DIRECTIONAL_MIN_DISTANCE,
+    input_red = true,
+    input_green = false,
   }
 end
 
@@ -176,6 +181,8 @@ local function normalize_condition_draft(draft)
     constant = normalize_constant(draft.constant),
     direction = normalize_direction(draft.direction),
     min_distance = normalize_min_distance(draft.min_distance),
+    input_red = draft.input_red ~= false,
+    input_green = draft.input_green == true,
   }
 end
 
@@ -190,6 +197,8 @@ local function condition_draft_from_config(config)
     constant = condition.constant,
     direction = config.emission_direction,
     min_distance = config.directional_min_distance,
+    input_red = not config.input_networks or config.input_networks.red ~= false,
+    input_green = config.input_networks and config.input_networks.green == true,
   }
 end
 
@@ -219,8 +228,8 @@ local function config_from_condition_draft(draft)
     directional_cone_angle_degrees = DIRECTIONAL_CONE_ANGLE_DEGREES,
     circuit_enable_disable = true,
     input_networks = {
-      red = true,
-      green = true,
+      red = normalized.input_red,
+      green = normalized.input_green,
     },
   }
 end
@@ -377,7 +386,7 @@ local function apply_proxy_config(proxy, config)
     pcall(function()
       behavior.input_networks = {
         red = config.input_networks.red ~= false,
-        green = config.input_networks.green ~= false,
+        green = config.input_networks.green == true,
       }
     end)
   end
@@ -671,7 +680,7 @@ function CircuitDetonator.has_pending_rearms()
   return next(storage.circuit_detonator_pending_rearms) ~= nil
 end
 
-function CircuitDetonator.process_pending_rearms(tick)
+function CircuitDetonator.process_pending_rearms(tick, has_detonatable_contents)
   if not storage or not storage.circuit_detonator_pending_rearms then return end
   if (tick or 0) % 10 ~= 0 then return end
 
@@ -687,7 +696,13 @@ function CircuitDetonator.process_pending_rearms(tick)
         return condition and condition.fulfilled == true
       end)
 
-      if ok and fulfilled == false then
+      local should_rearm = ok and fulfilled == false
+      if ok and fulfilled == true and type(has_detonatable_contents) == "function" then
+        local ok_payload, has_payload = pcall(has_detonatable_contents, chest)
+        should_rearm = ok_payload and has_payload == true
+      end
+
+      if should_rearm then
         apply_proxy_config(proxy, pending.config)
         storage.circuit_detonator_pending_rearms[chest_unit] = nil
       end
@@ -970,7 +985,7 @@ local function add_gui_section(parent, caption)
     content.style.horizontally_stretchable = true
   end)
 
-  return content
+  return content, header
 end
 
 function CircuitDetonator.build_gui(player, chest, expanded)
@@ -1061,7 +1076,30 @@ function CircuitDetonator.build_gui(player, chest, expanded)
     collapse.style.horizontal_align = "right"
   end)
 
-  local condition_content = add_gui_section(frame, { "detonation-gui.circuit-detonator-condition" })
+  local condition_content, condition_header = add_gui_section(
+    frame,
+    { "detonation-gui.circuit-detonator-condition" }
+  )
+  local input_spacer = condition_header.add { type = "empty-widget" }
+  pcall(function()
+    input_spacer.style.horizontally_stretchable = true
+  end)
+  condition_header.add {
+    type = "checkbox",
+    name = GUI_INPUT_RED,
+    caption = "R",
+    state = draft.input_red,
+    tooltip = { "detonation-gui.circuit-detonator-input-red-tooltip" },
+    tags = { chest_unit = chest.unit_number },
+  }
+  condition_header.add {
+    type = "checkbox",
+    name = GUI_INPUT_GREEN,
+    caption = "G",
+    state = draft.input_green,
+    tooltip = { "detonation-gui.circuit-detonator-input-green-tooltip" },
+    tags = { chest_unit = chest.unit_number },
+  }
 
   local condition_table = condition_content.add {
     type = "table",
@@ -1429,6 +1467,24 @@ function CircuitDetonator.on_gui_text_changed(event)
   return update_condition_draft_from_gui_event(event)
 end
 
+function CircuitDetonator.on_gui_checked_state_changed(event)
+  if not controlled_chest_detonation_enabled() then return false end
+  local element = event.element
+  if not (element and element.valid) then return false end
+  if element.name ~= GUI_INPUT_RED and element.name ~= GUI_INPUT_GREEN then return false end
+
+  local chest = chest_from_gui_event(event)
+  if not chest then return true end
+  local draft = get_condition_draft_for_chest(chest)
+  if element.name == GUI_INPUT_RED then
+    draft.input_red = element.state == true
+  else
+    draft.input_green = element.state == true
+  end
+  set_condition_draft_for_chest(chest, draft)
+  return true
+end
+
 function CircuitDetonator.arm_selected(player)
   if not controlled_chest_detonation_enabled() then
     if player then player.print({ "detonation-message.circuit-detonator-disabled" }) end
@@ -1562,7 +1618,24 @@ end
 
 function CircuitDetonator.initialize_storage()
   ensure_storage()
-  if controlled_chest_detonation_enabled() then return end
+  if controlled_chest_detonation_enabled() then
+    local migrate_input_networks = storage.circuit_detonator_input_network_version < 1
+    for _, link in pairs(storage.circuit_detonators_by_chest) do
+      if link and link.chest and link.chest.valid and link.proxy and link.proxy.valid then
+        connect_proxy_to_chest(link.chest, link.proxy)
+        if migrate_input_networks then
+          link.config = link.config or {}
+          link.config.input_networks = { red = true, green = false }
+          local behavior = link.proxy.get_control_behavior()
+          if behavior then
+            behavior.input_networks = { red = true, green = false }
+          end
+        end
+      end
+    end
+    storage.circuit_detonator_input_network_version = 1
+    return
+  end
 
   if game and game.surfaces then
     for _, surface in pairs(game.surfaces) do

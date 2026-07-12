@@ -1830,6 +1830,27 @@ local function on_gui_text_changed(event)
   if CircuitDetonator.on_gui_text_changed(event) then return end
 end
 
+local function has_detonatable_contents(entity)
+  if not (entity and entity.valid) then return false end
+  local ok, max_inventory_index = pcall(entity.get_max_inventory_index, entity)
+  if not ok or not max_inventory_index then return false end
+
+  for inventory_index = 1, max_inventory_index do
+    local inventory = entity.get_inventory(inventory_index)
+    if inventory and inventory.valid and not inventory.is_empty() then
+      local contents = inventory.get_contents()
+      for i = 1, #contents do
+        if ITEM_SPECS[contents[i].name] then return true end
+      end
+    end
+  end
+  return false
+end
+
+local function on_gui_checked_state_changed(event)
+  if CircuitDetonator.on_gui_checked_state_changed(event) then return end
+end
+
 local function on_selected_entity_changed(event)
   local player = game.get_player(event.player_index)
   if not player then return end
@@ -1864,7 +1885,7 @@ end
 process_tick = function(event)
   process_staggered_emit_jobs(event)
   Launcher.process_jobs(event, execute_real_launcher_fallback)
-  CircuitDetonator.process_pending_rearms(event.tick)
+  CircuitDetonator.process_pending_rearms(event.tick, has_detonatable_contents)
   refresh_range_visualizations(event)
   refresh_tick_handler()
 end
@@ -2034,6 +2055,7 @@ local function register_events()
   script.on_event(defines.events.on_gui_elem_changed, on_gui_elem_changed)
   script.on_event(defines.events.on_gui_selection_state_changed, on_gui_selection_state_changed)
   script.on_event(defines.events.on_gui_text_changed, on_gui_text_changed)
+  script.on_event(defines.events.on_gui_checked_state_changed, on_gui_checked_state_changed)
   script.on_event(defines.events.on_selected_entity_changed, on_selected_entity_changed)
   script.on_event(defines.events.on_player_left_game, on_visualization_player_removed)
   script.on_event(defines.events.on_player_removed, on_visualization_player_removed)

@@ -208,10 +208,12 @@ Practical implication:
   of polling `fulfilled` from Lua.
 
 Practical implication:
-- Connect the proxy mine to the chest once with red and green script wires.
-  Because the proxy is wired to the chest itself, later player wires attached
-  to the chest put both entities into the same circuit network without needing
-  wire-change events.
+- The proxy mine is connected to both chest circuit-wire colors, but its
+  `input_networks` selection defaults to red-only. Reading both colors sums both
+  networks and therefore duplicates the chest's own content signal when it is
+  emitted onto both. Expose vanilla-style R/G input checkboxes in the mod GUI,
+  preserve the selection in drafts/blueprints/copies, and migrate old links to
+  `{red=true, green=false}` once so existing item-count conditions stay exact.
 - The proxy mine's own action must only kill the proxy. The real chest
   detonation is performed by the normal `on_entity_died` path after the proxy
   death handler kills the linked chest.
@@ -222,6 +224,11 @@ Practical implication:
   `on_post_entity_died`, and restore it when `on_built_entity`,
   `on_robot_built_entity`, or `script_raised_revive` creates the replacement
   container.
+- A reusable chest must not require a false circuit edge before every new
+  payload. While its condition remains fulfilled, keep the replacement proxy
+  dormant only while the chest has no detonatable items; rearm it when new
+  explosive contents appear. This supports constant enable signals without an
+  empty-chest proxy recreation loop.
 
 ## Mod Development Guardrails
 - Prefer dynamic discovery over hardcoded prototype names.
