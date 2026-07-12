@@ -7,6 +7,12 @@ local Debug = require("debug")
 local Distribution = require("distribution")
 local Launcher = require("runtime.launcher")
 local CircuitDetonator = require("runtime.circuit_detonator")
+local OBSIDIAN_CHEST = "detonation-obsidian-chest"
+local REUSABLE_DETONATION_CHESTS = {
+  [OBSIDIAN_CHEST] = true,
+  ["detonation-obsidian-requester-chest"] = true,
+}
+local VISUALIZED_CHESTS = REUSABLE_DETONATION_CHESTS
 local debug_enabled = Debug.enabled
 
 local math_floor = math.floor
@@ -15,6 +21,8 @@ local math_min = math.min
 local math_log = math.log
 local math_cos = math.cos
 local math_sqrt = math.sqrt
+local math_atan2 = math.atan2
+local math_sin = math.sin
 local table_sort = table.sort
 
 local DEFAULT_PROJECTILE_DAMAGE = 50
@@ -67,6 +75,8 @@ local find_damage_in_action
 local process_tick
 local ensure_tick_handler
 local refresh_tick_handler
+local destroy_range_visualization
+local update_range_visualization
 local tick_handler_registered = false
 
 -- NOTE FOR FUTURE MAINTAINERS (verified against local Factorio docs 2.0.73):
@@ -202,6 +212,15 @@ local function describe_direction(direction)
   return "(" .. x .. "," .. y .. ")"
 end
 
+local function normalize_emit_options(options_or_direction)
+  if not options_or_direction then return {} end
+  if type(options_or_direction) ~= "table" then return {} end
+  if type(options_or_direction.x) == "number" and type(options_or_direction.y) == "number" then
+    return { direction = options_or_direction }
+  end
+  return options_or_direction
+end
+
 local function is_directional_blast_enabled()
   local setting = settings.global["detonation-directional-blasts"]
   return setting and setting.value == true
@@ -240,6 +259,11 @@ local function initialize_runtime_storage()
   CircuitDetonator.initialize_storage()
   storage.emit_jobs = storage.emit_jobs or {}
   storage.emit_job_count = storage.emit_job_count or 0
+  storage.range_visualizations = storage.range_visualizations or {}
+end
+
+local function has_range_visualizations()
+  return storage and storage.range_visualizations and next(storage.range_visualizations) ~= nil
 end
 
 local function has_pending_emit_jobs()
@@ -256,7 +280,10 @@ local function has_pending_emit_jobs()
 end
 
 local function has_pending_tick_work()
-  return has_pending_emit_jobs() or Launcher.has_pending_jobs()
+  return has_pending_emit_jobs()
+      or Launcher.has_pending_jobs()
+      or CircuitDetonator.has_pending_rearms()
+      or has_range_visualizations()
 end
 
 ensure_tick_handler = function()
@@ -1519,8 +1546,10 @@ local function execute_payload_emission(
   end
 end
 
-local function emit_payload(surface, center, payload, excluded_entity, force, cause, emission_direction)
+local function emit_payload(surface, center, payload, excluded_entity, force, cause, emit_options)
   if payload.total_count <= 0 then return end
+  emit_options = normalize_emit_options(emit_options)
+  local emission_direction = emit_options.direction
 
   local debug = debug_enabled()
   local setting_value = settings.global["detonation-max-explosions"].value
@@ -1567,6 +1596,8 @@ local function emit_payload(surface, center, payload, excluded_entity, force, ca
   local rng           = game.create_random_generator(emit_seed)
   local sampler       = Distribution.new(center, payload.total_count, rng, {
     direction = emission_direction,
+    min_distance = emit_options.min_distance,
+    cone_angle_degrees = emit_options.cone_angle_degrees,
   })
   local attack_force  = force or resolve_default_force()
   local average_speed = resolve_average_projectile_speed()
@@ -1692,8 +1723,33 @@ local function on_entity_died(event)
   local entity = event.entity
   if not (entity and entity.valid) then return end
   if CircuitDetonator.is_proxy(entity) then
-    local chest = CircuitDetonator.take_chest_for_dead_proxy(entity)
+    local chest, config = CircuitDetonator.take_chest_for_dead_proxy(entity)
     if chest and chest.valid then
+      if REUSABLE_DETONATION_CHESTS[chest.name] then
+        CircuitDetonator.cancel_forced_container_death(chest)
+        local payload = new_payload()
+        collect_from_entity(payload, chest, { consume_inventories = true })
+
+        if payload.total_count > 0 then
+          local emit_options = CircuitDetonator.emit_options_from_config(config)
+          emit_payload(
+            chest.surface,
+            chest.position,
+            payload,
+            chest,
+            resolve_entity_force(chest) or resolve_default_force(),
+            chest,
+            emit_options
+          )
+        end
+
+        -- The protected chest survives its activation and keeps the same
+        -- circuit condition ready for the next delivered batch of ammunition.
+        CircuitDetonator.schedule_rearm_after_condition_reset(chest, config)
+        ensure_tick_handler()
+        return
+      end
+
       local force = resolve_entity_force(chest) or resolve_default_force()
       if not chest.die(force, entity) then
         Debug.log("[DETONATION][CIRCUIT] Failed to kill linked chest " .. describe_entity(chest))
@@ -1707,7 +1763,7 @@ local function on_entity_died(event)
     return
   end
 
-  CircuitDetonator.prepare_container_death(entity, event.tick)
+  local circuit_detonator_config = CircuitDetonator.prepare_container_death(entity, event.tick)
 
   if debug_enabled() then
     Debug.log(
@@ -1727,7 +1783,8 @@ local function on_entity_died(event)
 
   if payload.total_count > 0 then
     local projectile_cause = resolve_projectile_cause_entity(entity)
-    local emission_direction = resolve_impact_direction(entity, event.cause)
+    local circuit_emit_options = CircuitDetonator.emit_options_from_config(circuit_detonator_config)
+    local emission_direction = circuit_emit_options or resolve_impact_direction(entity, event.cause)
     emit_payload(
       entity.surface,
       entity.position,
@@ -1773,10 +1830,195 @@ local function on_gui_text_changed(event)
   if CircuitDetonator.on_gui_text_changed(event) then return end
 end
 
+local function on_selected_entity_changed(event)
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  update_range_visualization(player)
+  if storage.range_visualizations[player.index] then ensure_tick_handler() end
+  refresh_tick_handler()
+end
+
+local function on_visualization_player_removed(event)
+  destroy_range_visualization(event.player_index)
+  refresh_tick_handler()
+end
+
+local function refresh_range_visualizations(event)
+  if event.tick % 30 ~= 0 then return end
+  if not (storage and storage.range_visualizations) then return end
+
+  local player_indices = {}
+  for player_index in pairs(storage.range_visualizations) do
+    player_indices[#player_indices + 1] = player_index
+  end
+  for i = 1, #player_indices do
+    local player = game.get_player(player_indices[i])
+    if player and player.valid and player.connected then
+      update_range_visualization(player)
+    else
+      destroy_range_visualization(player_indices[i])
+    end
+  end
+end
+
 process_tick = function(event)
   process_staggered_emit_jobs(event)
   Launcher.process_jobs(event, execute_real_launcher_fallback)
+  CircuitDetonator.process_pending_rearms(event.tick)
+  refresh_range_visualizations(event)
   refresh_tick_handler()
+end
+
+destroy_range_visualization = function(player_index)
+  if not (storage and storage.range_visualizations) then return end
+  local state = storage.range_visualizations[player_index]
+  if not state then return end
+
+  for i = 1, #(state.object_ids or {}) do
+    local object_id = state.object_ids[i]
+    pcall(function()
+      local object = rendering.get_object_by_id(object_id)
+      if object then object.destroy() end
+    end)
+  end
+  storage.range_visualizations[player_index] = nil
+end
+
+local function payload_visual_radius(payload)
+  if not payload or payload.total_count <= 0 then return nil, "empty" end
+
+  local spread = math_sqrt(payload.total_count)
+  local radius = 0
+  local signature_parts = { tostring(payload.total_count) }
+  for key, node in pairs(payload.by_projectile) do
+    local node_radius = spread * (node.radius_scale or 1)
+    if node.target_executor == EXECUTOR_REAL_LAUNCHER and type(node.launcher_max_distance) == "number" then
+      if node.family == FAMILY_LAUNCHER_STREAM then
+        node_radius = node.launcher_max_distance
+      else
+        node_radius = math_min(node_radius, node.launcher_max_distance)
+      end
+    end
+    radius = math_max(radius, node_radius)
+    signature_parts[#signature_parts + 1] = tostring(key) .. ":" .. tostring(node.exact_count)
+  end
+  table_sort(signature_parts)
+  return radius, table.concat(signature_parts, "|")
+end
+
+update_range_visualization = function(player)
+  if not (player and player.valid) then return end
+  storage.range_visualizations = storage.range_visualizations or {}
+
+  local chest = player.selected
+  if not (chest and chest.valid and VISUALIZED_CHESTS[chest.name]) then
+    destroy_range_visualization(player.index)
+    return
+  end
+
+  local payload = new_payload()
+  collect_from_entity(payload, chest)
+  local radius, payload_signature = payload_visual_radius(payload)
+  local emit_options = CircuitDetonator.get_chest_emit_options(chest) or {}
+  local direction = emit_options.direction
+  local min_distance = direction and math_max(0, emit_options.min_distance or 0) or 0
+  if radius then radius = math_max(radius, min_distance) end
+
+  local signature = table.concat({
+    tostring(chest.unit_number),
+    payload_signature,
+    tostring(radius or 0),
+    tostring(direction and direction.x or 0),
+    tostring(direction and direction.y or 0),
+    tostring(min_distance),
+  }, ":")
+  local previous = storage.range_visualizations[player.index]
+  if previous and previous.signature == signature then return end
+  destroy_range_visualization(player.index)
+
+  local state = { signature = signature, object_ids = {} }
+  storage.range_visualizations[player.index] = state
+  if not radius or radius <= 0 then return end
+
+  local function remember(object)
+    if object then state.object_ids[#state.object_ids + 1] = object.id end
+  end
+
+  local common = {
+    target = chest,
+    surface = chest.surface,
+    players = { player.index },
+    draw_on_ground = false,
+  }
+  if direction then
+    local cone_angle = math.rad(emit_options.cone_angle_degrees or 60)
+    local center_angle = math_atan2(direction.y, direction.x)
+    local inner_radius = math_min(min_distance, math_max(0, radius - 0.01))
+    remember(rendering.draw_arc {
+      color = { 0.12, 0.0375, 0.0375, 0.15 },
+      min_radius = inner_radius,
+      max_radius = radius,
+      start_angle = center_angle - cone_angle * 0.5,
+      angle = cone_angle,
+      target = common.target,
+      surface = common.surface,
+      players = common.players,
+      draw_on_ground = common.draw_on_ground,
+    })
+    remember(rendering.draw_arc {
+      color = { 0.36, 0.1125, 0.1125, 0.45 },
+      min_radius = math_max(0, radius - 0.12),
+      max_radius = radius,
+      start_angle = center_angle - cone_angle * 0.5,
+      angle = cone_angle,
+      target = common.target,
+      surface = common.surface,
+      players = common.players,
+      draw_on_ground = common.draw_on_ground,
+    })
+
+    for _, edge_angle in ipairs { center_angle - cone_angle * 0.5, center_angle + cone_angle * 0.5 } do
+      remember(rendering.draw_line {
+        color = { 0.36, 0.1125, 0.1125, 0.45 },
+        width = 1.5,
+        from = {
+          x = chest.position.x + math_cos(edge_angle) * inner_radius,
+          y = chest.position.y + math_sin(edge_angle) * inner_radius,
+        },
+        to = {
+          x = chest.position.x + math_cos(edge_angle) * radius,
+          y = chest.position.y + math_sin(edge_angle) * radius,
+        },
+        surface = common.surface,
+        players = common.players,
+        draw_on_ground = common.draw_on_ground,
+      })
+    end
+  else
+    remember(rendering.draw_circle {
+      color = { 0.12, 0.0375, 0.0375, 0.15 },
+      radius = radius,
+      width = 1,
+      filled = true,
+      target = common.target,
+      surface = common.surface,
+      players = common.players,
+      draw_on_ground = common.draw_on_ground,
+    })
+  end
+
+  if not direction then
+    remember(rendering.draw_circle {
+      color = { 0.36, 0.1125, 0.1125, 0.45 },
+      radius = radius,
+      width = 2,
+      filled = false,
+      target = common.target,
+      surface = common.surface,
+      players = common.players,
+      draw_on_ground = common.draw_on_ground,
+    })
+  end
 end
 
 local function register_events()
@@ -1792,6 +2034,9 @@ local function register_events()
   script.on_event(defines.events.on_gui_elem_changed, on_gui_elem_changed)
   script.on_event(defines.events.on_gui_selection_state_changed, on_gui_selection_state_changed)
   script.on_event(defines.events.on_gui_text_changed, on_gui_text_changed)
+  script.on_event(defines.events.on_selected_entity_changed, on_selected_entity_changed)
+  script.on_event(defines.events.on_player_left_game, on_visualization_player_removed)
+  script.on_event(defines.events.on_player_removed, on_visualization_player_removed)
   script.on_event(defines.events.on_entity_settings_pasted, CircuitDetonator.on_entity_settings_pasted)
   script.on_event(defines.events.on_player_setup_blueprint, CircuitDetonator.on_player_setup_blueprint)
   script.on_event(defines.events.on_blueprint_settings_pasted, CircuitDetonator.on_blueprint_settings_pasted)

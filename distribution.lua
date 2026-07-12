@@ -5,6 +5,7 @@ local DEFAULT_DIRECTIONAL_BACK_WEIGHT = 0.08
 local DEFAULT_DIRECTIONAL_SHARPNESS = 3
 local DEFAULT_FORWARD_DISTANCE_MULTIPLIER = math.sqrt(6)
 local BIASED_ANGLE_ATTEMPTS = 16
+local DEFAULT_CONE_ANGLE_DEGREES = 60
 
 local function normalize_direction(direction)
   if type(direction) ~= "table" or type(direction.x) ~= "number" or type(direction.y) ~= "number" then
@@ -48,13 +49,26 @@ end
 function Distribution.new(center, total_booms, rng, options)
   local spread = math.sqrt(total_booms)
   local direction_x, direction_y = normalize_direction(options and options.direction)
+  local cone_angle = nil
+  if type(options) == "table" and type(options.cone_angle_degrees) == "number" then
+    cone_angle = math.max(0, math.min(360, options.cone_angle_degrees)) * math.pi / 180
+  end
+  local min_distance = 0
+  if type(options) == "table" and type(options.min_distance) == "number" then
+    min_distance = math.max(0, options.min_distance)
+  end
 
   return function(radius_scale)
     local angle
     if direction_x then
-      angle = sample_biased_angle(rng, DEFAULT_DIRECTIONAL_BACK_WEIGHT, DEFAULT_DIRECTIONAL_SHARPNESS)
-      local distance_multiplier = directional_distance_multiplier(angle, DEFAULT_FORWARD_DISTANCE_MULTIPLIER)
-      local distance = math.sqrt(rng()) * spread * radius_scale * distance_multiplier
+      local distance_multiplier = 1
+      if cone_angle then
+        angle = (rng() - 0.5) * (cone_angle > 0 and cone_angle or (DEFAULT_CONE_ANGLE_DEGREES * math.pi / 180))
+      else
+        angle = sample_biased_angle(rng, DEFAULT_DIRECTIONAL_BACK_WEIGHT, DEFAULT_DIRECTIONAL_SHARPNESS)
+        distance_multiplier = directional_distance_multiplier(angle, DEFAULT_FORWARD_DISTANCE_MULTIPLIER)
+      end
+      local distance = math.max(min_distance, math.sqrt(rng()) * spread * radius_scale * distance_multiplier)
       local cos_angle = math.cos(angle)
       local sin_angle = math.sin(angle)
       return {

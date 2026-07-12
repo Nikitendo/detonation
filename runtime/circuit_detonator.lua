@@ -14,12 +14,28 @@ local GUI_CONDITION_SIGNAL = "detonation_circuit_detonator_condition_signal"
 local GUI_CONDITION_COMPARATOR = "detonation_circuit_detonator_condition_comparator"
 local GUI_CONDITION_SECOND_SIGNAL = "detonation_circuit_detonator_condition_second_signal"
 local GUI_CONDITION_CONSTANT = "detonation_circuit_detonator_condition_constant"
+local GUI_MIN_DISTANCE = "detonation_circuit_detonator_min_distance"
+local GUI_DIRECTION_PREFIX = "detonation_circuit_detonator_direction_"
 local GUI_APPLY = "detonation_circuit_detonator_apply"
 local GUI_REMOVE = "detonation_circuit_detonator_remove"
 
 local COMPARATORS = { ">", "<", "=", "≥", "≤", "≠" }
 local DEFAULT_COMPARATOR = ">"
 local DEFAULT_CONSTANT = 0
+local DEFAULT_DIRECTIONAL_MIN_DISTANCE = 5
+local DIRECTIONAL_CONE_ANGLE_DEGREES = 60
+
+local DIRECTION_CHOICES = {
+  { key = "north-west", sprite = "virtual-signal/up-left-arrow", x = -1, y = -1 },
+  { key = "north", sprite = "virtual-signal/up-arrow", x = 0, y = -1 },
+  { key = "north-east", sprite = "virtual-signal/up-right-arrow", x = 1, y = -1 },
+  { key = "west", sprite = "virtual-signal/left-arrow", x = -1, y = 0 },
+  { key = "none", sprite = "virtual-signal/signal-sun", x = 0, y = 0 },
+  { key = "east", sprite = "virtual-signal/right-arrow", x = 1, y = 0 },
+  { key = "south-west", sprite = "virtual-signal/down-left-arrow", x = -1, y = 1 },
+  { key = "south", sprite = "virtual-signal/down-arrow", x = 0, y = 1 },
+  { key = "south-east", sprite = "virtual-signal/down-right-arrow", x = 1, y = 1 },
+}
 
 local WIRE_CONNECTORS = {
   defines.wire_connector_id.circuit_red,
@@ -36,6 +52,7 @@ local function ensure_storage()
   storage.circuit_detonator_pending_rebuilds = storage.circuit_detonator_pending_rebuilds or {}
   storage.circuit_detonator_pending_ghosts = storage.circuit_detonator_pending_ghosts or {}
   storage.circuit_detonator_condition_drafts = storage.circuit_detonator_condition_drafts or {}
+  storage.circuit_detonator_pending_rearms = storage.circuit_detonator_pending_rearms or {}
 end
 
 local function get_player(player_index)
@@ -99,6 +116,7 @@ local function default_condition_draft()
   return {
     comparator = DEFAULT_COMPARATOR,
     constant = DEFAULT_CONSTANT,
+    min_distance = DEFAULT_DIRECTIONAL_MIN_DISTANCE,
   }
 end
 
@@ -106,6 +124,41 @@ local function normalize_constant(value)
   local number = tonumber(value)
   if not number then return DEFAULT_CONSTANT end
   return math.floor(number)
+end
+
+local function normalize_min_distance(value)
+  local number = tonumber(value)
+  if not number then return DEFAULT_DIRECTIONAL_MIN_DISTANCE end
+  return math.max(0, math.floor(number))
+end
+
+local function normalize_direction(direction)
+  if type(direction) ~= "table" then return nil end
+  local x = tonumber(direction.x)
+  local y = tonumber(direction.y)
+  if not x or not y then return nil end
+  x = x < 0 and -1 or (x > 0 and 1 or 0)
+  y = y < 0 and -1 or (y > 0 and 1 or 0)
+  if x == 0 and y == 0 then return nil end
+  return { x = x, y = y }
+end
+
+local function direction_key(direction)
+  local normalized = normalize_direction(direction)
+  if not normalized then return "none" end
+  for i = 1, #DIRECTION_CHOICES do
+    local choice = DIRECTION_CHOICES[i]
+    if choice.x == normalized.x and choice.y == normalized.y then return choice.key end
+  end
+  return "none"
+end
+
+local function direction_from_key(key)
+  for i = 1, #DIRECTION_CHOICES do
+    local choice = DIRECTION_CHOICES[i]
+    if choice.key == key then return normalize_direction(choice) end
+  end
+  return nil
 end
 
 local function normalize_signal(signal)
@@ -121,6 +174,8 @@ local function normalize_condition_draft(draft)
     comparator = normalize_comparator(draft.comparator),
     second_signal = normalize_signal(draft.second_signal),
     constant = normalize_constant(draft.constant),
+    direction = normalize_direction(draft.direction),
+    min_distance = normalize_min_distance(draft.min_distance),
   }
 end
 
@@ -133,6 +188,8 @@ local function condition_draft_from_config(config)
     comparator = condition.comparator,
     second_signal = condition.second_signal,
     constant = condition.constant,
+    direction = config.emission_direction,
+    min_distance = config.directional_min_distance,
   }
 end
 
@@ -157,6 +214,9 @@ local function config_from_condition_draft(draft)
       second_signal = condition.second_signal,
       constant = condition.constant,
     },
+    emission_direction = copy_table(normalized.direction),
+    directional_min_distance = normalized.min_distance,
+    directional_cone_angle_degrees = DIRECTIONAL_CONE_ANGLE_DEGREES,
     circuit_enable_disable = true,
     input_networks = {
       red = true,
@@ -217,6 +277,23 @@ local function rebuild_key_for_entity(entity)
   )
 end
 
+local function rebuild_key_for_ghost(ghost)
+  if not (ghost and ghost.valid) then return nil end
+  local ghost_name = nil
+  pcall(function()
+    ghost_name = ghost.ghost_name
+  end)
+  if type(ghost_name) ~= "string" then return nil end
+
+  return rebuild_key(
+    ghost.surface.index,
+    ghost_name,
+    ghost.position,
+    force_name(ghost.force),
+    normalize_quality_name(ghost)
+  )
+end
+
 local function make_blueprint_tag(config)
   if not config then return nil end
 
@@ -271,6 +348,21 @@ local function capture_proxy_config(proxy)
   end
 
   return config
+end
+
+local function merge_stored_config(proxy_config, stored_config)
+  local config = copy_table(proxy_config or {})
+  if type(stored_config) ~= "table" then return config end
+
+  config.emission_direction = copy_table(normalize_direction(stored_config.emission_direction))
+  config.directional_min_distance = normalize_min_distance(stored_config.directional_min_distance)
+  config.directional_cone_angle_degrees = DIRECTIONAL_CONE_ANGLE_DEGREES
+  return config
+end
+
+local function capture_link_config(link)
+  if not link then return nil end
+  return merge_stored_config(capture_proxy_config(link.proxy), link.config)
 end
 
 local function apply_proxy_config(proxy, config)
@@ -337,10 +429,12 @@ local function get_link_for_chest(chest)
   return get_link_by_chest_unit(chest.unit_number)
 end
 
+local remove_pending_rebuild_for_ghost
+
 local function config_from_active_chest_detonator(chest)
   local link = get_link_for_chest(chest)
   if not link then return nil end
-  return capture_proxy_config(link.proxy)
+  return capture_link_config(link)
 end
 
 local function get_condition_draft_for_chest(chest)
@@ -352,7 +446,7 @@ local function get_condition_draft_for_chest(chest)
 
   local link = get_link_for_chest(chest)
   if link then
-    return condition_draft_from_config(capture_proxy_config(link.proxy))
+    return condition_draft_from_config(capture_link_config(link))
   end
 
   return default_condition_draft()
@@ -459,6 +553,7 @@ function CircuitDetonator.ensure_for_chest(chest, config)
   local existing = get_link_for_chest(chest)
   if existing then
     connect_proxy_to_chest(chest, existing.proxy)
+    existing.config = merge_stored_config(config, config)
     apply_proxy_config(existing.proxy, config)
     return existing.proxy
   end
@@ -471,6 +566,7 @@ function CircuitDetonator.ensure_for_chest(chest, config)
     chest_unit = chest.unit_number,
     proxy = proxy,
     proxy_unit = proxy.unit_number,
+    config = merge_stored_config(config, config),
   }
   storage.circuit_detonators_by_proxy[proxy.unit_number] = chest.unit_number
   apply_proxy_config(proxy, config)
@@ -483,6 +579,8 @@ local function remove_link(chest_unit, destroy_proxy)
 
   local link = storage.circuit_detonators_by_chest[chest_unit]
   if not link then return end
+
+  storage.circuit_detonator_pending_rearms[chest_unit] = nil
 
   storage.circuit_detonators_by_chest[chest_unit] = nil
   if link.proxy_unit then
@@ -502,7 +600,12 @@ function CircuitDetonator.remove_for_chest(chest)
 end
 
 function CircuitDetonator.cleanup_entity(entity)
-  if not (entity and entity.valid and entity.unit_number) then return end
+  if not (entity and entity.valid) then return end
+  if entity.type == "entity-ghost" then
+    remove_pending_rebuild_for_ghost(entity)
+    return
+  end
+  if not entity.unit_number then return end
   if CircuitDetonator.is_proxy(entity) then
     local chest_unit = storage.circuit_detonators_by_proxy
         and storage.circuit_detonators_by_proxy[entity.unit_number]
@@ -530,15 +633,66 @@ function CircuitDetonator.take_chest_for_dead_proxy(proxy)
 
   local link = storage.circuit_detonators_by_chest[chest_unit]
   local chest = link and link.chest or nil
-  local config = link and capture_proxy_config(link.proxy) or nil
+  local config = link and capture_link_config(link) or nil
   remove_link(chest_unit, false)
 
   if chest and chest.valid and chest.unit_number and config then
     storage.circuit_detonator_forced_death_configs[chest.unit_number] = config
   end
 
-  if chest and chest.valid then return chest end
-  return nil
+  if chest and chest.valid then return chest, config end
+  return nil, config
+end
+
+function CircuitDetonator.cancel_forced_container_death(chest)
+  if not (chest and chest.valid and chest.unit_number) then return end
+  ensure_storage()
+  storage.circuit_detonator_forced_death_configs[chest.unit_number] = nil
+end
+
+function CircuitDetonator.schedule_rearm_after_condition_reset(chest, config)
+  if not (chest and chest.valid and chest.unit_number and type(config) == "table") then return end
+  ensure_storage()
+
+  local dormant_config = copy_table(config)
+  dormant_config.circuit_enable_disable = false
+  local proxy = CircuitDetonator.ensure_for_chest(chest, dormant_config)
+  if not (proxy and proxy.valid) then return end
+
+  storage.circuit_detonator_pending_rearms[chest.unit_number] = {
+    chest = chest,
+    proxy = proxy,
+    config = copy_table(config),
+  }
+end
+
+function CircuitDetonator.has_pending_rearms()
+  if not storage or not storage.circuit_detonator_pending_rearms then return false end
+  return next(storage.circuit_detonator_pending_rearms) ~= nil
+end
+
+function CircuitDetonator.process_pending_rearms(tick)
+  if not storage or not storage.circuit_detonator_pending_rearms then return end
+  if (tick or 0) % 10 ~= 0 then return end
+
+  for chest_unit, pending in pairs(storage.circuit_detonator_pending_rearms) do
+    local chest = pending.chest
+    local proxy = pending.proxy
+    if not (chest and chest.valid and proxy and proxy.valid) then
+      storage.circuit_detonator_pending_rearms[chest_unit] = nil
+    else
+      local ok, fulfilled = pcall(function()
+        local behavior = proxy.get_control_behavior()
+        local condition = behavior and behavior.circuit_condition
+        return condition and condition.fulfilled == true
+      end)
+
+      if ok and fulfilled == false then
+        apply_proxy_config(proxy, pending.config)
+        storage.circuit_detonator_pending_rearms[chest_unit] = nil
+      end
+    end
+  end
 end
 
 local function remember_pending_death(entity, config, tick)
@@ -566,7 +720,7 @@ function CircuitDetonator.prepare_container_death(entity, tick)
 
   local link = get_link_for_chest(entity)
   if not config and link then
-    config = capture_proxy_config(link.proxy)
+    config = capture_link_config(link)
   end
 
   if config then
@@ -576,6 +730,24 @@ function CircuitDetonator.prepare_container_death(entity, tick)
   local chest_unit = entity.unit_number
   remove_link(entity.unit_number, true)
   clear_condition_draft_for_chest_unit(chest_unit)
+  return config
+end
+
+function CircuitDetonator.emit_options_from_config(config)
+  if type(config) ~= "table" then return nil end
+  local direction = normalize_direction(config.emission_direction)
+  if not direction then return nil end
+
+  return {
+    direction = direction,
+    min_distance = normalize_min_distance(config.directional_min_distance),
+    cone_angle_degrees = DIRECTIONAL_CONE_ANGLE_DEGREES,
+  }
+end
+
+function CircuitDetonator.get_chest_emit_options(chest)
+  if not CircuitDetonator.is_supported_container(chest) then return nil end
+  return CircuitDetonator.emit_options_from_config(config_from_active_chest_detonator(chest))
 end
 
 local function take_pending_death(event, surface_index)
@@ -613,6 +785,20 @@ local function remove_pending_rebuild_key(key)
       pending_ghosts[ghost_unit] = nil
     end
   end
+end
+
+remove_pending_rebuild_for_ghost = function(ghost)
+  if not (ghost and ghost.valid) then return end
+  ensure_storage()
+
+  local key = nil
+  if ghost.unit_number then
+    key = storage.circuit_detonator_pending_ghosts[ghost.unit_number]
+  end
+  if not key then
+    key = rebuild_key_for_ghost(ghost)
+  end
+  remove_pending_rebuild_key(key)
 end
 
 function CircuitDetonator.on_post_entity_died(event)
@@ -704,7 +890,7 @@ function CircuitDetonator.on_entity_settings_pasted(event)
   local source_link = get_link_for_chest(source)
   if not source_link then return end
 
-  local config = capture_proxy_config(source_link.proxy)
+  local config = capture_link_config(source_link)
   if not config then return end
 
   set_condition_draft_for_chest(destination, condition_draft_from_config(config))
@@ -734,12 +920,7 @@ end
 
 function CircuitDetonator.on_pre_ghost_deconstructed(event)
   if not controlled_chest_detonation_enabled() then return end
-  local ghost = event.ghost
-  if not (ghost and ghost.valid and ghost.unit_number) then return end
-  ensure_storage()
-
-  local key = storage.circuit_detonator_pending_ghosts[ghost.unit_number]
-  remove_pending_rebuild_key(key)
+  remove_pending_rebuild_for_ghost(event.ghost or event.entity)
 end
 
 local function destroy_gui(player)
@@ -754,6 +935,42 @@ end
 
 function CircuitDetonator.destroy_gui(player)
   destroy_gui(player)
+end
+
+local function add_gui_section(parent, caption)
+  local section = parent.add {
+    type = "frame",
+    style = "detonation_section_frame",
+    direction = "vertical",
+  }
+  pcall(function()
+    section.style.horizontally_stretchable = true
+    section.style.bottom_margin = 8
+  end)
+
+  local header = section.add {
+    type = "frame",
+    style = "subheader_frame",
+  }
+  pcall(function()
+    header.style.horizontally_stretchable = true
+  end)
+  header.add {
+    type = "label",
+    caption = caption,
+    style = "subheader_caption_label",
+  }
+
+  local content = section.add {
+    type = "flow",
+    style = "detonation_section_content_flow",
+    direction = "vertical",
+  }
+  pcall(function()
+    content.style.horizontally_stretchable = true
+  end)
+
+  return content
 end
 
 function CircuitDetonator.build_gui(player, chest, expanded)
@@ -836,20 +1053,17 @@ function CircuitDetonator.build_gui(player, chest, expanded)
     type = "sprite-button",
     name = GUI_COLLAPSE,
     sprite = "utility/close",
+    style = "frame_action_button",
     tooltip = { "detonation-gui.circuit-detonator-close-tooltip" },
     tags = { chest_unit = chest.unit_number },
   }
   pcall(function()
-    collapse.style.size = 24
     collapse.style.horizontal_align = "right"
   end)
 
-  frame.add {
-    type = "label",
-    caption = { "detonation-gui.circuit-detonator-condition" },
-  }
+  local condition_content = add_gui_section(frame, { "detonation-gui.circuit-detonator-condition" })
 
-  local condition_table = frame.add {
+  local condition_table = condition_content.add {
     type = "table",
     column_count = 4,
   }
@@ -920,6 +1134,65 @@ function CircuitDetonator.build_gui(player, chest, expanded)
     end)
   end
 
+  local direction_content = add_gui_section(frame, { "detonation-gui.circuit-detonator-direction" })
+
+  local direction_flow = direction_content.add {
+    type = "flow",
+    direction = "vertical",
+  }
+  pcall(function()
+    direction_flow.style.top_margin = 4
+    direction_flow.style.vertical_spacing = 4
+  end)
+
+  local direction_table = direction_flow.add {
+    type = "table",
+    column_count = 3,
+    style = "detonation_direction_table",
+  }
+
+  local selected_direction_key = direction_key(draft.direction)
+  for i = 1, #DIRECTION_CHOICES do
+    local choice = DIRECTION_CHOICES[i]
+    local direction_button = add_styled_button(direction_table, {
+      type = "sprite-button",
+      name = GUI_DIRECTION_PREFIX .. choice.key,
+      sprite = choice.sprite,
+      tooltip = { "detonation-gui.circuit-detonator-direction-tooltip" },
+      tags = { chest_unit = chest.unit_number },
+    }, { "slot_button", "button" })
+    pcall(function()
+      direction_button.style.size = 40
+      direction_button.toggled = choice.key == selected_direction_key
+    end)
+  end
+
+  local min_distance_flow = direction_flow.add {
+    type = "flow",
+    direction = "horizontal",
+  }
+  min_distance_flow.add {
+    type = "label",
+    caption = { "detonation-gui.circuit-detonator-min-distance" },
+    style = "heading_2_label",
+  }
+  pcall(function()
+    min_distance_flow.style.horizontal_spacing = 8
+    min_distance_flow.style.vertical_align = "center"
+  end)
+  local min_distance = min_distance_flow.add {
+    type = "textfield",
+    name = GUI_MIN_DISTANCE,
+    text = tostring(normalize_min_distance(draft.min_distance)),
+    numeric = true,
+    allow_decimal = false,
+    allow_negative = false,
+    tags = { chest_unit = chest.unit_number },
+  }
+  pcall(function()
+    min_distance.style.width = 56
+  end)
+
   local buttons = frame.add {
     type = "flow",
     direction = "vertical",
@@ -935,7 +1208,7 @@ function CircuitDetonator.build_gui(player, chest, expanded)
     caption = { "detonation-gui.circuit-detonator-apply-short" },
     tooltip = { "detonation-gui.circuit-detonator-apply" },
     tags = { chest_unit = chest.unit_number },
-  }, { "green_button" })
+  }, { "detonation_green_button", "green_button", "confirm_button" })
   pcall(function()
     apply.style.horizontally_stretchable = true
   end)
@@ -993,6 +1266,12 @@ local function chest_from_gui_event(event)
   return nil
 end
 
+local function direction_key_from_gui_name(name)
+  if type(name) ~= "string" then return nil end
+  if string.sub(name, 1, #GUI_DIRECTION_PREFIX) ~= GUI_DIRECTION_PREFIX then return nil end
+  return string.sub(name, #GUI_DIRECTION_PREFIX + 1)
+end
+
 function CircuitDetonator.on_gui_opened(event)
   local player = get_player(event.player_index)
   if not player then return end
@@ -1032,7 +1311,14 @@ function CircuitDetonator.on_gui_click(event)
   local element = event.element
   if not (element and element.valid) then return false end
   local name = element.name
-  if name ~= GUI_EXPAND and name ~= GUI_COLLAPSE and name ~= GUI_APPLY and name ~= GUI_REMOVE then return false end
+  local clicked_direction_key = direction_key_from_gui_name(name)
+  if name ~= GUI_EXPAND
+      and name ~= GUI_COLLAPSE
+      and name ~= GUI_APPLY
+      and name ~= GUI_REMOVE
+      and not clicked_direction_key then
+    return false
+  end
   if not controlled_chest_detonation_enabled() then return true end
 
   local player = get_player(event.player_index)
@@ -1055,6 +1341,14 @@ function CircuitDetonator.on_gui_click(event)
     ensure_storage()
     storage.circuit_detonator_gui_expanded[player.index] = false
     CircuitDetonator.build_gui(player, chest, false)
+    return true
+  end
+
+  if clicked_direction_key then
+    local draft = get_condition_draft_for_chest(chest)
+    draft.direction = direction_from_key(clicked_direction_key)
+    set_condition_draft_for_chest(chest, draft)
+    CircuitDetonator.build_gui(player, chest, true)
     return true
   end
 
@@ -1090,7 +1384,8 @@ local function update_condition_draft_from_gui_event(event)
   if name ~= GUI_CONDITION_SIGNAL
       and name ~= GUI_CONDITION_COMPARATOR
       and name ~= GUI_CONDITION_SECOND_SIGNAL
-      and name ~= GUI_CONDITION_CONSTANT then
+      and name ~= GUI_CONDITION_CONSTANT
+      and name ~= GUI_MIN_DISTANCE then
     return false
   end
 
@@ -1114,6 +1409,8 @@ local function update_condition_draft_from_gui_event(event)
     end
   elseif name == GUI_CONDITION_CONSTANT then
     draft.constant = normalize_constant(element.text)
+  elseif name == GUI_MIN_DISTANCE then
+    draft.min_distance = normalize_min_distance(element.text)
   end
 
   set_condition_draft_for_chest(chest, draft)
@@ -1298,6 +1595,7 @@ function CircuitDetonator.initialize_storage()
   storage.circuit_detonator_pending_rebuilds = {}
   storage.circuit_detonator_pending_ghosts = {}
   storage.circuit_detonator_condition_drafts = {}
+  storage.circuit_detonator_pending_rearms = {}
 end
 
 return CircuitDetonator
